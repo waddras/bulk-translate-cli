@@ -62,8 +62,8 @@ DEFAULT_SETTINGS = {
     # Output
     "FILE_CONFLICT": "overwrite",
     "EMBED_FONT": False,
-    "FONT_NAME": "Amiri",
-    "FONT_SIZE": 40,
+    "FONT_NAME": "Noto Sans Arabic",
+    "FONT_SIZE": 18,
     "FONT_OUTLINE": 1,
     "FONT_SHADOW": 0,
     "FONT_ALIGNMENT": 2,
@@ -119,7 +119,12 @@ def load_settings() -> dict:
     if _settings_file:
         try:
             with open(_settings_file) as f:
-                user = json.load(f)
+                raw = f.read()
+            # Strip // comments (not inside strings)
+            import re
+            cleaned = re.sub(r'(?m)^\s*//.*$', '', raw)
+            cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)  # trailing commas
+            user = json.loads(cleaned)
             # Deep merge for dicts (like LANGUAGE_CODES)
             for k, v in user.items():
                 if isinstance(v, dict) and isinstance(merged.get(k), dict):
