@@ -19,6 +19,7 @@ import time
 import httpx
 
 from .config import cfg
+from .logger import log
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -34,9 +35,10 @@ async def _enforce_cooldown():
     elapsed = time.time() - _last_api_call
     if _last_api_call > 0 and elapsed < cooldown:
         wait = cooldown - elapsed
-        print(f"  Cooldown: waiting {wait:.0f}s...")
+        log.cooldown(wait)
         await asyncio.sleep(wait)
     _last_api_call = time.time()
+
 
 
 # ── Prompt Building ───────────────────────────────────────────────────────────
@@ -54,7 +56,6 @@ def _build_prompt(chunk: dict, show_name: str = "",
             .replace("{target_language}", target_lang)
             .replace("{json_blob}", json.dumps(chunk, ensure_ascii=False))
         )
-    # Fallback prompt
     return (
         f"You are a professional {source_lang} to {target_lang} subtitle translator.\n"
         f"Translate each value in the following JSON object to {target_lang}.\n"
@@ -67,7 +68,7 @@ def _build_prompt(chunk: dict, show_name: str = "",
 def _build_full_context_prompt(translate_keys: list, full_blob: dict,
                                show_name: str = "", source_lang: str = "english",
                                target_lang: str = "arabic") -> str:
-    """Build prompt for full_context mode: send entire blob, translate specific keys."""
+    """Build prompt for full_context mode."""
     return (
         f"You are a professional {source_lang} to {target_lang} subtitle translator.\n"
         f"Context: Subtitles from \"{show_name or 'Unknown'}\".\n\n"
@@ -105,6 +106,7 @@ def _generation_config() -> dict:
     return gen
 
 
+
 # ── Model Pool ────────────────────────────────────────────────────────────────
 
 def _get_model_for_attempt(attempt: int) -> str:
@@ -113,7 +115,6 @@ def _get_model_for_attempt(attempt: int) -> str:
     primary = cfg.get("GEMINI_MODEL", "gemini-2.5-flash")
     if not pool:
         return primary
-    # First attempt uses primary, subsequent cycle through pool
     if attempt <= 1:
         return primary
     idx = (attempt - 2) % len(pool)
@@ -132,7 +133,6 @@ async def _call_gemini(client: httpx.AsyncClient, prompt: str, api_key: str,
 
     url = f"{GEMINI_BASE}/{model}:generateContent"
     gen_cfg = _generation_config()
-    retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
 
     try:
         await _enforce_cooldown()
@@ -147,7 +147,7 @@ async def _call_gemini(client: httpx.AsyncClient, prompt: str, api_key: str,
         )
 
         if response.status_code == 429:
-            print(f"    Rate limited (429) - model: {model}")
+            log.detail(f"    Rate limited (429) - model: {model}")
             return None
 
         response.raise_for_status()
@@ -156,11 +156,12 @@ async def _call_gemini(client: httpx.AsyncClient, prompt: str, api_key: str,
         return result
 
     except httpx.HTTPStatusError as e:
-        print(f"    HTTP {e.response.status_code} - model: {model}")
+        log.detail(f"    HTTP {e.response.status_code} - model: {model}")
         return None
     except Exception as e:
-        print(f"    ERROR: {e} - model: {model}")
+        log.detail(f"    ERROR: {e} - model: {model}")
         return None
+
 
 
 # ── Chunked Mode ──────────────────────────────────────────────────────────────
@@ -168,10 +169,7 @@ async def _call_gemini(client: httpx.AsyncClient, prompt: str, api_key: str,
 async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: str,
                             show_name: str = "", source_lang: str = "english",
                             target_lang: str = "arabic") -> dict:
-    """Translate using chunked mode: independent chunks with retry.
-
-    Returns {key: translated_text} for all successfully translated keys.
-    """
+    """Translate using chunked mode: independent chunks with retry."""
     from .blob import estimate_output_tokens
 
     translated = {}
@@ -187,25 +185,27 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
             chunk_num = batch_start + i + 1
             est = estimate_output_tokens(chunk)
             model = cfg.get("GEMINI_MODEL", "gemini-2.5-flash")
-            print(f"  CHUNK {chunk_num}/{total} - {len(chunk)} lines, ~{est} tokens - model: {model}")
+            log.chunk_status(chunk_num, total, len(chunk), est, model)
 
             prompt = _build_prompt(chunk, show_name, source_lang, target_lang)
 
             for attempt in range(1, retry_attempts + 1):
                 result = await _call_gemini(client, prompt, api_key, attempt=attempt)
                 if result:
-                    print(f"    SUCCESS ({len(result)} keys)")
+                    log.chunk_success(chunk_num, len(result))
                     translated.update(result)
+                    log.advance_progress()
                     break
                 else:
-                    print(f"    Attempt {attempt}/{retry_attempts} failed")
+                    log.attempt(attempt, retry_attempts, "failed")
                     if attempt < retry_attempts:
                         await asyncio.sleep(retry_cooldown * attempt)
-
             else:
-                print(f"    CHUNK {chunk_num} FAILED after {retry_attempts} attempts")
+                log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
+                log.advance_progress()
 
     return translated
+
 
 
 # ── Multi-Turn Mode ───────────────────────────────────────────────────────────
@@ -214,13 +214,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                                full_payload: dict, api_key: str,
                                show_name: str = "", source_lang: str = "english",
                                target_lang: str = "arabic") -> dict:
-    """Translate using multi_turn mode: full blob as context, chunks as turns.
-
-    The full blob is sent as a system/context message, then each chunk
-    is requested as a follow-up turn in the same conversation.
-
-    Returns {key: translated_text}
-    """
+    """Translate using multi_turn mode: full blob as context, chunks as turns."""
     from .blob import estimate_output_tokens
     import json_repair
 
@@ -230,7 +224,6 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
     retry_attempts = cfg.get("RETRY_ATTEMPTS", 5)
     retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
 
-    # Build conversation context
     context_text = (
         f"You are a professional {source_lang} to {target_lang} subtitle translator.\n"
         f"Context: Subtitles from \"{show_name or 'Unknown'}\".\n\n"
@@ -242,12 +235,11 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
         f"- No extra keys, no explanation, no markdown"
     )
 
-    # Build conversation turns
     contents = [{"role": "user", "parts": [{"text": context_text}]}]
 
     for chunk_num, chunk in enumerate(chunks, 1):
         est = estimate_output_tokens(chunk)
-        print(f"  TURN {chunk_num}/{len(chunks)} - {len(chunk)} lines, ~{est} tokens - model: {model}")
+        log.chunk_status(chunk_num, len(chunks), len(chunk), est, model)
 
         keys_to_translate = list(chunk.keys())
         turn_text = (
@@ -257,9 +249,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
             f"{json.dumps(chunk, ensure_ascii=False)}"
         )
 
-        # Add this turn
         current_contents = contents + [{"role": "user", "parts": [{"text": turn_text}]}]
-
         url = f"{GEMINI_BASE}/{model}:generateContent"
 
         for attempt in range(1, retry_attempts + 1):
@@ -268,38 +258,33 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                 response = await client.post(
                     url,
                     headers={"x-goog-api-key": api_key},
-                    json={
-                        "contents": current_contents,
-                        "generationConfig": gen_cfg,
-                    },
+                    json={"contents": current_contents, "generationConfig": gen_cfg},
                     timeout=300.0,
                 )
-
                 if response.status_code == 429:
-                    print(f"    Attempt {attempt}/{retry_attempts} - rate limited")
+                    log.attempt(attempt, retry_attempts, "rate limited")
                     if attempt < retry_attempts:
                         await asyncio.sleep(retry_cooldown * attempt)
                     continue
-
                 response.raise_for_status()
                 raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
                 result = json_repair.loads(raw)
-                print(f"    SUCCESS ({len(result)} keys)")
+                log.chunk_success(chunk_num, len(result))
                 translated.update(result)
-
-                # Add model response to conversation for context continuity
                 contents.append({"role": "user", "parts": [{"text": turn_text}]})
                 contents.append({"role": "model", "parts": [{"text": raw}]})
+                log.advance_progress()
                 break
-
             except Exception as e:
-                print(f"    Attempt {attempt}/{retry_attempts} - ERROR: {e}")
+                log.attempt(attempt, retry_attempts, str(e))
                 if attempt < retry_attempts:
                     await asyncio.sleep(retry_cooldown)
         else:
-            print(f"    TURN {chunk_num} FAILED after {retry_attempts} attempts")
+            log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
+            log.advance_progress()
 
     return translated
+
 
 
 # ── Full Context Mode ─────────────────────────────────────────────────────────
@@ -308,13 +293,7 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
                                  full_payload: dict, api_key: str,
                                  show_name: str = "", source_lang: str = "english",
                                  target_lang: str = "arabic") -> dict:
-    """Translate using full_context mode: full blob sent every request.
-
-    Each request includes the entire blob but asks to translate only specific keys.
-    Most expensive but highest context quality.
-
-    Returns {key: translated_text}
-    """
+    """Translate using full_context mode: full blob sent every request."""
     from .blob import estimate_output_tokens
 
     translated = {}
@@ -324,8 +303,7 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
     for chunk_num, chunk in enumerate(chunks, 1):
         est = estimate_output_tokens(chunk)
         model = cfg.get("GEMINI_MODEL", "gemini-2.5-flash")
-        print(f"  CHUNK {chunk_num}/{len(chunks)} - {len(chunk)} lines, ~{est} tokens "
-              f"(full context) - model: {model}")
+        log.chunk_status(chunk_num, len(chunks), len(chunk), est, f"{model} (full context)")
 
         keys = list(chunk.keys())
         prompt = _build_full_context_prompt(keys, full_payload, show_name, source_lang, target_lang)
@@ -333,28 +311,27 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
         for attempt in range(1, retry_attempts + 1):
             result = await _call_gemini(client, prompt, api_key, attempt=attempt)
             if result:
-                # Filter to only requested keys
                 filtered = {k: v for k, v in result.items() if k in keys}
-                print(f"    SUCCESS ({len(filtered)} keys)")
+                log.chunk_success(chunk_num, len(filtered))
                 translated.update(filtered)
+                log.advance_progress()
                 break
             else:
-                print(f"    Attempt {attempt}/{retry_attempts} failed")
+                log.attempt(attempt, retry_attempts, "failed")
                 if attempt < retry_attempts:
                     await asyncio.sleep(retry_cooldown * attempt)
         else:
-            print(f"    CHUNK {chunk_num} FAILED after {retry_attempts} attempts")
+            log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
+            log.advance_progress()
 
     return translated
+
 
 
 # ── Retry Missing Keys ────────────────────────────────────────────────────────
 
 def build_retry_batches(missing_keys: set, full_payload: dict, context_lines: int = 3) -> list:
-    """Build retry chunks for missing keys with neighboring context.
-
-    Returns list of {translate_keys: [...], context: {...}}
-    """
+    """Build retry chunks for missing keys with neighboring context."""
     all_keys = list(full_payload.keys())
     key_to_idx = {k: i for i, k in enumerate(all_keys)}
     max_lines = max(1, cfg.get("MAX_LINES_PER_CHUNK", 1000))
@@ -396,10 +373,7 @@ def build_retry_batches(missing_keys: set, full_payload: dict, context_lines: in
 async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
                         full_payload: dict, api_key: str, show_name: str = "",
                         source_lang: str = "english", target_lang: str = "arabic") -> dict:
-    """Retry translation of missing keys with context + model cycling.
-
-    Returns {key: translated_text} for recovered keys.
-    """
+    """Retry translation of missing keys with context + model cycling."""
     recovered = {}
     max_retries = cfg.get("MAX_FAILED_CHUNKS", 5)
     retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
@@ -409,14 +383,14 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
         if not remaining:
             break
 
-        print(f"\n  Retry round {retry_round}/{max_retries} - {len(remaining)} lines missing")
+        log.info(f"\n  Retry round {retry_round}/{max_retries} - {len(remaining)} lines missing")
         batches = build_retry_batches(remaining, full_payload, context_lines=3)
-        print(f"    Split into {len(batches)} retry batch(es)")
+        log.detail(f"    Split into {len(batches)} retry batch(es)")
 
         for batch_num, batch in enumerate(batches, 1):
-            # Cycle model on each retry round
             model = _get_model_for_attempt(retry_round + 1)
-            print(f"  RETRY {batch_num}/{len(batches)} - {len(batch['translate_keys'])} lines - model: {model}")
+            log.detail(f"  RETRY {batch_num}/{len(batches)} - "
+                       f"{len(batch['translate_keys'])} lines - model: {model}")
 
             prompt = _build_retry_prompt(
                 batch["translate_keys"], batch["context"],
@@ -428,23 +402,24 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
                 result = await _call_gemini(client, prompt, api_key, model=model, attempt=attempt)
                 if result:
                     filtered = {k: v for k, v in result.items() if k in batch["translate_keys"]}
-                    print(f"    Recovered {len(filtered)}/{len(batch['translate_keys'])} keys")
+                    log.info(f"    Recovered {len(filtered)}/{len(batch['translate_keys'])} keys")
                     recovered.update(filtered)
                     remaining -= set(filtered.keys())
                     break
                 else:
-                    print(f"    Retry attempt {attempt} failed")
+                    log.attempt(attempt, retry_attempts, "retry failed")
                     if attempt < retry_attempts:
                         await asyncio.sleep(retry_cooldown)
 
         if not remaining:
-            print(f"  All lines recovered after {retry_round} retry round(s)!")
+            log.success(f"  All lines recovered after {retry_round} retry round(s)!")
             break
 
     if remaining:
-        print(f"\n  WARNING: {len(remaining)} lines remain untranslated after retries")
+        log.warning(f"{len(remaining)} lines remain untranslated after retries")
 
     return recovered
+
 
 
 # ── Main Translation Runner ───────────────────────────────────────────────────
@@ -452,15 +427,11 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
 async def run_translation(chunks: list, payload: dict, api_key: str,
                           show_name: str = "", source_lang: str = "english",
                           target_lang: str = "arabic") -> dict:
-    """Run async translation using the configured mode, then retry missing.
-
-    Returns {key: translated_text} for all unique payload keys.
-    """
+    """Run async translation using the configured mode, then retry missing."""
     mode = cfg.get("TRANSLATION_MODE", "chunked")
     translated = {}
 
     async with httpx.AsyncClient() as client:
-        # Phase: Translate
         if mode == "multi_turn":
             translated = await translate_multi_turn(
                 client, chunks, payload, api_key, show_name, source_lang, target_lang
@@ -470,12 +441,11 @@ async def run_translation(chunks: list, payload: dict, api_key: str,
                 client, chunks, payload, api_key, show_name, source_lang, target_lang
             )
         else:
-            # Default: chunked
             translated = await translate_chunked(
                 client, chunks, api_key, show_name, source_lang, target_lang
             )
 
-        # Phase: Retry missing
+        # Retry missing
         all_keys = set()
         for ch in chunks:
             all_keys.update(ch.keys())

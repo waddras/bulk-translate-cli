@@ -4,11 +4,19 @@
 Two subcommands:
     btcli probe    — inspect files for subtitle tracks, styles, tags
     btcli translate — full translation pipeline
+
+Verbosity flags (global, before subcommand):
+    --quiet    minimal output (timestamps + summaries only)
+    --verbose  full output (debug details, per-attempt logs)
+    (default)  medium output (rich progress bars, colored, ETA)
 """
+from __future__ import annotations
+
 import argparse
 import sys
 
 from . import __version__
+from .logger import log
 
 
 def _parse_args():
@@ -17,6 +25,18 @@ def _parse_args():
         description="Bulk subtitle translation CLI",
     )
     parser.add_argument("--version", action="version", version=f"btcli {__version__}")
+
+    # Global verbosity flags
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument("--quiet", "-q", action="store_true",
+                           help="Minimal output: timestamps + phase summaries only")
+    verbosity.add_argument("--verbose", "-v", action="store_true",
+                           help="Full output: debug details, per-attempt logs, structured levels")
+
+    # Log file
+    parser.add_argument("--log-file", default=None, metavar="PATH",
+                        help="Write all output to a log file (regardless of verbosity level)")
+
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
     # ── probe ─────────────────────────────────────────────────────────────────
@@ -55,11 +75,28 @@ def _parse_args():
 def main():
     args = _parse_args()
 
+    # Configure logger
+    if args.quiet:
+        log.set_level("minimal")
+    elif args.verbose:
+        log.set_level("full")
+    else:
+        log.set_level("medium")
+
+    if args.log_file:
+        log.set_log_file(args.log_file)
+
+    log.start_timer()
+
     if not args.command:
         print("No command specified. Use --help for usage.")
         print("\nCommands:")
         print("  btcli probe -p <path> [-i vid|sub] [-m sample|recursive] [-f filter] [-o outputs]")
         print("  btcli translate -p <path> [-l lang] [-i vid|sub] [-f filter] [-t tracks] [-suffix .ar] [-o srt]")
+        print("\nVerbosity:")
+        print("  --quiet / -q     Minimal output (timestamps + summaries)")
+        print("  --verbose / -v   Full output (debug details)")
+        print("  (default)        Medium output (progress bars, colors, ETA)")
         sys.exit(1)
 
     if args.command == "probe":
@@ -88,6 +125,8 @@ def main():
             force_srt=(args.o == "srt"),
             show_name=args.show_name,
         )
+
+    log.close()
 
 
 if __name__ == "__main__":

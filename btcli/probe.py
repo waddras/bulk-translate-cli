@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import cfg
 from .discover import discover_files
 from .extract import probe_tracks
+from .logger import log
 from .srt_pre import get_styles_from_file, scan_tags_from_file
 
 SEP = "=" * 60
@@ -35,21 +36,21 @@ def _probe_video_files(files: list, show_tags: bool = False) -> dict:
     for i, fpath in enumerate(files, 1):
         fpath = Path(fpath)
         if not fpath.exists():
-            print(f"  [{i:02d}] {fpath.name} - NOT FOUND")
+            log.item(f"[{i:02d}] {fpath.name} - NOT FOUND")
             continue
 
         try:
             tracks = probe_tracks(str(fpath))
             results[str(fpath)] = tracks
-            print(f"  [{i:02d}] {fpath.name}:")
+            log.item(f"[{i:02d}] {fpath.name}:")
 
             if not tracks:
-                print(f"        No subtitle tracks found")
+                log.detail(f"        No subtitle tracks found")
                 continue
 
             for t in tracks:
                 title = f' "{t["title"]}"' if t["title"] else ""
-                print(f"        Track {t['index']}: [{t['language']}] ({t['codec']}){title}")
+                log.info(f"        Track {t['index']}: [{t['language']}] ({t['codec']}){title}")
 
             # If tags requested, extract first track and scan
             if show_tags and tracks:
@@ -61,12 +62,12 @@ def _probe_video_files(files: list, show_tags: bool = False) -> dict:
                         extracted = extract_track(str(fpath), 0, tmp_out)
                         tags = scan_tags_from_file(extracted)
                         if tags:
-                            print(f"        Tags (track 0): {', '.join(sorted(tags))}")
+                            log.info(f"        Tags (track 0): {', '.join(sorted(tags))}")
                 except Exception as e:
-                    print(f"        Tags: could not scan ({e})")
+                    log.detail(f"        Tags: could not scan ({e})")
 
         except Exception as e:
-            print(f"  [{i:02d}] {fpath.name} - ERROR: {e}")
+            log.item(f"[{i:02d}] {fpath.name} - ERROR: {e}")
             results[str(fpath)] = []
 
     return results
@@ -89,7 +90,7 @@ def _probe_subtitle_files(files: list, show_tags: bool = False) -> dict:
     for i, fpath in enumerate(files, 1):
         fpath = Path(fpath)
         if not fpath.exists():
-            print(f"  [{i:02d}] {fpath.name} - NOT FOUND")
+            log.item(f"[{i:02d}] {fpath.name} - NOT FOUND")
             continue
 
         info = {"styles": [], "tags": []}
@@ -107,13 +108,13 @@ def _probe_subtitle_files(files: list, show_tags: bool = False) -> dict:
 
         # Print
         size_kb = fpath.stat().st_size / 1024
-        print(f"  [{i:02d}] {fpath.name}  ({size_kb:.1f} KB)")
+        log.item(f"[{i:02d}] {fpath.name}  ({size_kb:.1f} KB)")
         if styles:
-            print(f"        Styles: {', '.join(styles)}")
+            log.info(f"        Styles: {', '.join(styles)}")
         else:
-            print(f"        Styles: (none / SRT format)")
+            log.info(f"        Styles: (none / SRT format)")
         if show_tags and info["tags"]:
-            print(f"        Tags: {', '.join(info['tags'])}")
+            log.info(f"        Tags: {', '.join(info['tags'])}")
 
     return results
 
@@ -143,16 +144,16 @@ def run_probe(path: str, input_type: str = "vid", scan_mode: str = "sample",
 
     if not files:
         kind = "video" if input_type == "vid" else "subtitle"
-        print(f"No {kind} files found in: {path}")
+        log.error(f"No {kind} files found in: {path}")
         if filter_pattern:
-            print(f"  (filter: '{filter_pattern}')")
+            log.detail(f"  (filter: '{filter_pattern}')")
         return {}
 
-    print(SEP)
-    print(f"PROBE - {len(files)} file(s) [{input_type}] [{scan_mode}]")
+    log.sep()
+    log.phase(f"PROBE - {len(files)} file(s) [{input_type}] [{scan_mode}]")
     if filter_pattern:
-        print(f"  Filter: '{filter_pattern}'")
-    print(SEP)
+        log.info(f"  Filter: '{filter_pattern}'")
+    log.sep()
 
     # Run probe
     if input_type == "vid":
@@ -160,8 +161,8 @@ def run_probe(path: str, input_type: str = "vid", scan_mode: str = "sample",
     else:
         results = _probe_subtitle_files(files, show_tags=show_tags)
 
-    print(SEP)
-    print(f"PROBE COMPLETE - {len(results)} files analyzed")
+    log.sep()
+    log.phase(f"PROBE COMPLETE - {len(results)} files analyzed")
 
     # Summary for subtitle probe
     if input_type == "sub":
@@ -172,8 +173,8 @@ def run_probe(path: str, input_type: str = "vid", scan_mode: str = "sample",
                 all_styles.update(info.get("styles", []))
                 all_tags.update(info.get("tags", []))
         if all_styles:
-            print(f"  All styles: {', '.join(sorted(all_styles))}")
+            log.stat("All styles", ", ".join(sorted(all_styles)))
         if show_tags and all_tags:
-            print(f"  All tags: {', '.join(sorted(all_tags))}")
+            log.stat("All tags", ", ".join(sorted(all_tags)))
 
     return results

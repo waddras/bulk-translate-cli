@@ -124,13 +124,15 @@ def list_files(
     filter_pattern: str | None = None,
 ) -> None:
     """Print discovered files."""
+    from .logger import log
+
     files = discover_files(path, mode, scan_mode, filter_pattern)
     kind = "video" if mode == "vid" else "subtitle"
     if not files:
-        print(f"No {kind} files found in: {path}")
+        log.error(f"No {kind} files found in: {path}")
         return
-    print(f"Found {len(files)} {kind} file(s):")
+    log.info(f"Found {len(files)} {kind} file(s):")
     for i, f in enumerate(files, 1):
         size_kb = f.stat().st_size / 1024
         rel = f.relative_to(Path(path).resolve()) if f.is_relative_to(Path(path).resolve()) else f.name
-        print(f"  [{i:02d}] {rel}  ({size_kb:.1f} KB)")
+        log.item(f"[{i:02d}] {rel}  ({size_kb:.1f} KB)")

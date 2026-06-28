@@ -21,9 +21,8 @@ from .blob import build_blob, expand_translations, estimate_output_tokens, split
 from .config import cfg, get_lang_code, get_suffix_for_lang
 from .discover import discover_files
 from .extract import extract_from_videos
+from .logger import log
 from .sub_post import reassemble_files
-
-SEP = "=" * 60
 
 
 # ── Show Name Detection ───────────────────────────────────────────────────────
@@ -103,118 +102,123 @@ def run_translate(
     # API key check
     api_key = cfg.get("GEMINI_API_KEY", "")
     if not api_key:
-        print("ERROR: No API key. Set GEMINI_API_KEY in settings.conf or environment.")
+        log.error("No API key. Set GEMINI_API_KEY in settings.conf or environment.")
         return
 
-    print(SEP)
-    print(f"TRANSLATE - {source_lang} → {target_lang}")
-    print(f"  Path: {path}")
-    print(f"  Input: {input_type} | Suffix: {suffix} | Force SRT: {force_srt}")
-    print(SEP)
+    log.sep()
+    log.phase(f"TRANSLATE - {source_lang} → {target_lang}")
+    log.stat("Path", path)
+    log.stat("Input", f"{input_type} | Suffix: {suffix} | Force SRT: {force_srt}")
+    log.sep()
 
     # Phase 0: Discover/Extract files
     if input_type == "vid":
-        # Discover video files (always recursive for translate)
         video_files = discover_files(path, mode="vid", scan_mode="recursive",
                                      filter_pattern=filter_pattern)
         if not video_files:
-            print(f"ERROR: No video files found in: {path}")
+            log.error(f"No video files found in: {path}")
             return
 
-        print(f"Found {len(video_files)} video file(s)")
+        log.info(f"Found {len(video_files)} video file(s)")
         tracks = track_indices or [0]
-        print(f"Extracting track(s): {tracks}")
-        print(SEP)
+        log.info(f"Extracting track(s): {tracks}")
+        log.sep()
 
-        # Extract subtitle tracks
         sub_files = extract_from_videos(
             [str(f) for f in video_files],
             tracks,
             force_srt=force_srt,
         )
         if not sub_files:
-            print("ERROR: No subtitles extracted.")
+            log.error("No subtitles extracted.")
             return
 
         files = [Path(f) for f in sub_files]
     else:
-        # Discover subtitle files (always recursive for translate)
         files = discover_files(path, mode="sub", scan_mode="recursive",
                                filter_pattern=filter_pattern)
         if not files:
-            print(f"ERROR: No subtitle files found in: {path}")
+            log.error(f"No subtitle files found in: {path}")
             if filter_pattern:
-                print(f"  (filter: '{filter_pattern}')")
+                log.detail(f"  (filter: '{filter_pattern}')")
             return
 
     # Report files
-    print(SEP)
-    print(f"TRANSLATE - {len(files)} subtitle file(s)")
+    log.sep()
+    log.phase(f"FILES - {len(files)} subtitle file(s)")
     for i, f in enumerate(files, 1):
         f = Path(f)
-        print(f"  [{i:02d}] {f.name}  ({f.stat().st_size / 1024:.1f} KB)")
+        log.item(f"[{i:02d}] {f.name}  ({f.stat().st_size / 1024:.1f} KB)")
 
     # Phase 1: Build blob
-    print(SEP)
-    print("PHASE 1 - Building blob...")
+    log.sep()
+    log.phase("PHASE 1 - Building blob...")
     meta, payload, stats = build_blob(files)
     if stats["total"] == 0:
-        print("ERROR: No dialogue cues found in selected files.")
+        log.error("No dialogue cues found in selected files.")
         return
 
     max_blob = cfg.get("MAX_BLOB_LINES", 50000)
     if stats["total"] > max_blob:
-        print(f"ERROR: Too many cues ({stats['total']} > {max_blob}). Select fewer files.")
+        log.error(f"Too many cues ({stats['total']} > {max_blob}). Select fewer files.")
         return
 
-    print(f"DEDUP: {stats['total']} total -> {stats['unique']} unique "
-          f"({stats['collapsed']} collapsed, ~{stats['pct']}% fewer tokens)")
+    log.info(f"DEDUP: {stats['total']} total → {stats['unique']} unique "
+             f"({stats['collapsed']} collapsed, ~{stats['pct']}% fewer tokens)")
 
     # Phase 2: Split into chunks
-    print(SEP)
-    print("PHASE 2 - Splitting into chunks...")
+    log.sep()
+    log.phase("PHASE 2 - Splitting into chunks...")
     chunks = split_blob(payload)
-    print(f"Split into {len(chunks)} chunk(s)")
+    log.info(f"Split into {len(chunks)} chunk(s)")
     total_tokens = 0
     for i, ch in enumerate(chunks, 1):
         est = estimate_output_tokens(ch)
         total_tokens += est
-        print(f"  Chunk {i}: {len(ch)} lines, ~{est} output tokens")
-    print(f"Total estimated output tokens: {total_tokens}")
+        log.detail(f"  Chunk {i}: {len(ch)} lines, ~{est} output tokens")
+    log.stat("Total estimated output tokens", str(total_tokens))
 
     # Detect show name
     if not show_name:
         show_name = _detect_show_name(files)
-    print(f"Show name: {show_name}")
+    log.stat("Show name", show_name)
 
     mode = cfg.get("TRANSLATION_MODE", "chunked")
-    print(f"Translation mode: {mode}")
+    log.stat("Translation mode", mode)
 
     # Phase 3: Translate
-    print(SEP)
-    print("PHASE 3 - Translating...")
+    log.sep()
+    log.phase("PHASE 3 - Translating...")
+    log.start_progress("Translating", total=len(chunks))
+
     translated_unique = asyncio.run(
         run_translation(chunks, payload, api_key, show_name, source_lang, target_lang)
     )
 
+    log.finish_progress()
+
     # Phase 4: Reassemble
-    print(SEP)
-    print("PHASE 4 - Reassembling output files...")
+    log.sep()
+    log.phase("PHASE 4 - Reassembling output files...")
     translated_blob = expand_translations(translated_unique, meta)
     completed, warnings = reassemble_files(
         translated_blob, meta, files, suffix=suffix, force_srt=force_srt
     )
 
     # Report
-    print(SEP)
+    log.sep()
     total_keys = len(set().union(*[set(ch.keys()) for ch in chunks]))
     translated_count = len(translated_unique)
-    print(f"COMPLETE - {len(completed)} files written")
-    print(f"  Translated: {translated_count}/{total_keys} unique lines "
-          f"({round(translated_count / total_keys * 100) if total_keys else 0}%)")
-    if warnings:
-        print(f"  Warnings: {len(warnings)}")
+    pct = round(translated_count / total_keys * 100) if total_keys else 0
+
+    log.summary("Translation Complete", [
+        ("Files written", str(len(completed))),
+        ("Translated", f"{translated_count}/{total_keys} unique lines ({pct}%)"),
+        ("Warnings", str(len(warnings)) if warnings else "0"),
+        ("Elapsed", log.elapsed()),
+    ])
+
     for f in completed:
-        print(f"  done: {f}")
+        log.success(f"  done: {f}")
     for w in warnings:
-        print(f"  warning: {w}")
+        log.warning(w)

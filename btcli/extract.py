@@ -15,6 +15,7 @@ from pathlib import Path
 import pysubs2
 
 from .config import cfg
+from .logger import log
 
 
 # ── Probe ─────────────────────────────────────────────────────────────────────
@@ -148,7 +149,7 @@ def extract_and_combine_tracks(filepath: str, track_indices: list,
                         "style": getattr(event, "style", "Default"),
                     })
             except Exception as e:
-                print(f"    Warning: failed to extract track {idx}: {e}")
+                log.detail(f"    Warning: failed to extract track {idx}: {e}")
                 continue
 
     if not all_events:
@@ -182,8 +183,8 @@ def extract_and_combine_tracks(filepath: str, track_indices: list,
         subs_out.append(event)
 
     subs_out.save(str(out_path))
-    print(f"    Combined {len(track_indices)} tracks -> {len(unique_events)} events "
-          f"(from {len(all_events)} total)")
+    log.info(f"    Combined {len(track_indices)} tracks → {len(unique_events)} events "
+             f"(from {len(all_events)} total)")
     return str(out_path)
 
 
@@ -206,7 +207,7 @@ def extract_from_videos(video_files: list, track_indices: list,
 
     for i, vpath in enumerate(video_files, 1):
         fpath = Path(vpath)
-        print(f"  [{i:02d}/{len(video_files)}] {fpath.name}")
+        log.item(f"[{i:02d}/{len(video_files)}] {fpath.name}")
 
         # Build output path
         ext = "srt" if force_srt else "ass"
@@ -219,8 +220,8 @@ def extract_from_videos(video_files: list, track_indices: list,
             else:
                 result = extract_track(str(fpath), track_indices[0], out_path, force_srt)
             extracted.append(result)
-            print(f"        -> {Path(result).name}")
+            log.detail(f"        → {Path(result).name}")
         except Exception as e:
-            print(f"        ERROR: {e}")
+            log.detail(f"        ERROR: {e}")
 
     return extracted

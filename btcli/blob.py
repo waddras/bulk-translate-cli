@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import cfg
+from .logger import log
 from .srt_pre import parse_subtitle_file
 
 
@@ -36,7 +37,7 @@ def build_blob(files: list, keep_styles: list | None = None):
         try:
             cues = parse_subtitle_file(fpath, keep_styles=keep_styles)
         except Exception as e:
-            print(f"  Failed to parse {fpath.name}: {e}")
+            log.detail(f"  Failed to parse {fpath.name}: {e}")
             continue
 
         for block_num, cue in enumerate(cues, start=1):
@@ -62,7 +63,7 @@ def build_blob(files: list, keep_styles: list | None = None):
                 "pos_tags": cue.get("pos_tags", ""),
             }
 
-        print(f"  [{file_id}] {fpath.name} -> {len(cues)} cues")
+        log.item(f"[{file_id}] {fpath.name} → {len(cues)} cues")
 
     unique = len(payload)
     collapsed = total - unique

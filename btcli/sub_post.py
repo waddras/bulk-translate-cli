@@ -17,6 +17,7 @@ from pathlib import Path
 import pysubs2
 
 from .config import cfg
+from .logger import log
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 RLI = "\u2067"  # Right-to-Left Isolate
@@ -162,14 +163,14 @@ def embed_font_in_ass(ass_content: str, font_path: str | None = None) -> str:
                 break
 
     if not font_path or not Path(font_path).exists():
-        print(f"    Warning: Font file not found for embedding, skipping")
+        log.detail("    Warning: Font file not found for embedding, skipping")
         return ass_content
 
     # Subset the font to Arabic characters only
     try:
         font_data = _subset_font(font_path)
     except Exception as e:
-        print(f"    Warning: Font subsetting failed ({e}), embedding full font")
+        log.detail(f"    Warning: Font subsetting failed ({e}), embedding full font")
         font_data = Path(font_path).read_bytes()
 
     # Encode to base64 in ASS format (76-char lines)
@@ -278,7 +279,7 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
     for file_idx, cues in file_cues.items():
         fpath = Path(str(files[file_idx - 1]))
         if not cues:
-            print(f"  No cues for {fpath.name} - skipping")
+            log.detail(f"  No cues for {fpath.name} - skipping")
             warnings.append(f"{fpath.name}: no cues found")
             continue
 
@@ -319,11 +320,11 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
 
         # Report
         if untranslated:
-            print(f"  {out_path.name}: {len(blocks) - len(untranslated)}/{len(blocks)} translated, "
-                  f"{len(untranslated)} kept as original")
+            log.info(f"  {out_path.name}: {len(blocks) - len(untranslated)}/{len(blocks)} translated, "
+                     f"{len(untranslated)} kept as original")
             warnings.append(f"{out_path.name}: {len(untranslated)} lines untranslated")
         else:
-            print(f"  {out_path.name}: {len(blocks)} cues (fully translated)")
+            log.info(f"  {out_path.name}: {len(blocks)} cues (fully translated)")
 
         completed.append(out_path.name)
 
