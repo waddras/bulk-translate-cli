@@ -1,2 +1,2 @@
-"""btcli — Bulk Translate CLI"""
-__version__ = "1.0.0"
+"""bulk-translate-cli — CLI subtitle translation tool."""
+__version__ = "0.2.0"

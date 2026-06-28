@@ -1,136 +1,177 @@
-#!/usr/bin/env python3
-"""Probe flow — inspect files for tracks, styles, and tags."""
-import json
-import re
-import subprocess
+"""Probe flow: inspect video/subtitle files for tracks, styles, and tags.
+
+Supports:
+  - -i vid: probe video files for subtitle tracks (via ffprobe)
+  - -i sub: probe subtitle files for styles and tags
+  - -m sample/recursive: discovery mode
+  - -o tracks,styles,tags: what info to output
+"""
 from pathlib import Path
 
-from btcli.discover import discover_files
+from .config import cfg
+from .discover import discover_files
+from .extract import probe_tracks
+from .srt_pre import get_styles_from_file, scan_tags_from_file
+
+SEP = "=" * 60
 
 
-def run_probe(path: str, mode: str, input_type: str, file_filter: str, output: str, cfg: dict):
-    """Run probe on discovered files."""
-    files = discover_files(path, input_type, file_filter, mode, cfg)
-    if not files:
-        print("[probe] No files found matching criteria.")
-        return
+# ── Probe Video Files ─────────────────────────────────────────────────────────
 
-    print(f"[probe] Found {len(files)} files (mode: {mode})")
-    print("=" * 60)
+def _probe_video_files(files: list, show_tags: bool = False) -> dict:
+    """Probe video files for subtitle tracks.
 
-    # Determine what to output
-    default_output = cfg["defaults"].get("probe_output", "tracks,styles")
-    if output == "tags":
-        show_items = {"tracks", "styles", "tags"}
-    elif output:
-        show_items = set(output.split(","))
-    else:
-        show_items = set(default_output.split(","))
+    Args:
+        files: list of Path objects to video files
+        show_tags: if True, extract a track and scan for ASS tags
 
-    all_tracks = []
-    all_styles = set()
-    all_tags = set()
+    Returns:
+        {filepath: [tracks]} dict
+    """
+    results = {}
 
-    for f in files:
-        print(f"\n  {f.name}")
+    for i, fpath in enumerate(files, 1):
+        fpath = Path(fpath)
+        if not fpath.exists():
+            print(f"  [{i:02d}] {fpath.name} - NOT FOUND")
+            continue
 
-        if "tracks" in show_items and input_type == "vid":
-            tracks = _probe_tracks(f)
-            all_tracks.extend(tracks)
+        try:
+            tracks = probe_tracks(str(fpath))
+            results[str(fpath)] = tracks
+            print(f"  [{i:02d}] {fpath.name}:")
+
+            if not tracks:
+                print(f"        No subtitle tracks found")
+                continue
+
             for t in tracks:
                 title = f' "{t["title"]}"' if t["title"] else ""
-                codec = _simplify_codec(t["codec"])
-                print(f"    Track {t['index']}: [{t['language']}] ({codec}){title}")
+                print(f"        Track {t['index']}: [{t['language']}] ({t['codec']}){title}")
 
-        if ("styles" in show_items or "tags" in show_items) and f.suffix.lower() in (".ass", ".ssa"):
-            content = f.read_text(encoding="utf-8", errors="replace")
-            if "styles" in show_items:
-                styles = _extract_styles(content)
-                all_styles.update(styles)
-            if "tags" in show_items:
-                tags = _extract_tags(content)
-                all_tags.update(tags)
+            # If tags requested, extract first track and scan
+            if show_tags and tracks:
+                try:
+                    from .extract import extract_track
+                    import tempfile
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        tmp_out = str(Path(tmpdir) / "probe_tags.ass")
+                        extracted = extract_track(str(fpath), 0, tmp_out)
+                        tags = scan_tags_from_file(extracted)
+                        if tags:
+                            print(f"        Tags (track 0): {', '.join(sorted(tags))}")
+                except Exception as e:
+                    print(f"        Tags: could not scan ({e})")
 
-    # Summary
-    print("\n" + "=" * 60)
-    print("[probe] Summary:")
-    if "tracks" in show_items and all_tracks:
-        unique_tracks = {}
-        for t in all_tracks:
-            key = f"{t['index']}-{t['language']}-{t['codec']}"
-            if key not in unique_tracks:
-                unique_tracks[key] = t
-        print(f"  Unique tracks: {len(unique_tracks)}")
-        for t in unique_tracks.values():
-            codec = _simplify_codec(t["codec"])
-            title = f' "{t["title"]}"' if t["title"] else ""
-            print(f"    Track {t['index']}: [{t['language']}] ({codec}){title}")
-    if "styles" in show_items and all_styles:
-        print(f"  Unique styles: {', '.join(sorted(all_styles))}")
-    if "tags" in show_items and all_tags:
-        print(f"  Unique tags: {', '.join(sorted(all_tags))}")
+        except Exception as e:
+            print(f"  [{i:02d}] {fpath.name} - ERROR: {e}")
+            results[str(fpath)] = []
+
+    return results
 
 
-def _probe_tracks(filepath: Path) -> list:
-    """Probe MKV for subtitle tracks."""
-    cmd = [
-        "ffprobe", "-v", "quiet",
-        "-print_format", "json",
-        "-show_streams", "-select_streams", "s",
-        str(filepath),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        return []
-    data = json.loads(result.stdout)
-    tracks = []
-    for i, stream in enumerate(data.get("streams", [])):
-        tracks.append({
-            "index": i,
-            "codec": stream.get("codec_name", "unknown"),
-            "language": stream.get("tags", {}).get("language", "und"),
-            "title": stream.get("tags", {}).get("title", ""),
-        })
-    return tracks
+# ── Probe Subtitle Files ──────────────────────────────────────────────────────
 
+def _probe_subtitle_files(files: list, show_tags: bool = False) -> dict:
+    """Probe subtitle files for styles and optionally tags.
 
-def _extract_styles(content: str) -> list:
-    """Extract style names from ASS content."""
-    styles = []
-    in_styles = False
-    for line in content.splitlines():
-        if line.strip().lower().startswith("[v4"):
-            in_styles = True
+    Args:
+        files: list of Path objects to subtitle files
+        show_tags: if True, also scan for unique ASS override tags
+
+    Returns:
+        {filepath: {styles: [...], tags: [...]}} dict
+    """
+    results = {}
+
+    for i, fpath in enumerate(files, 1):
+        fpath = Path(fpath)
+        if not fpath.exists():
+            print(f"  [{i:02d}] {fpath.name} - NOT FOUND")
             continue
-        if in_styles and line.startswith("["):
-            break
-        if in_styles and line.startswith("Style:"):
-            name = line.split(":", 1)[1].split(",")[0].strip()
-            if name and name not in styles:
-                styles.append(name)
-    return styles
+
+        info = {"styles": [], "tags": []}
+
+        # Styles
+        styles = get_styles_from_file(fpath)
+        info["styles"] = styles
+
+        # Tags
+        if show_tags:
+            tags = scan_tags_from_file(fpath)
+            info["tags"] = sorted(tags)
+
+        results[str(fpath)] = info
+
+        # Print
+        size_kb = fpath.stat().st_size / 1024
+        print(f"  [{i:02d}] {fpath.name}  ({size_kb:.1f} KB)")
+        if styles:
+            print(f"        Styles: {', '.join(styles)}")
+        else:
+            print(f"        Styles: (none / SRT format)")
+        if show_tags and info["tags"]:
+            print(f"        Tags: {', '.join(info['tags'])}")
+
+    return results
 
 
-def _extract_tags(content: str) -> set:
-    """Extract unique ASS override tag names from dialogue lines."""
-    tags = set()
-    tag_re = re.compile(r"\\([a-z]+)")
-    for line in content.splitlines():
-        if line.startswith("Dialogue:"):
-            for match in re.finditer(r"\{([^}]*)\}", line):
-                block = match.group(1)
-                for tag_match in tag_re.finditer(block):
-                    tags.add(tag_match.group(1))
-    return tags
+# ── Main Probe Runner ─────────────────────────────────────────────────────────
 
+def run_probe(path: str, input_type: str = "vid", scan_mode: str = "sample",
+              filter_pattern: str | None = None, outputs: str = "tracks,styles") -> dict:
+    """Run the probe flow.
 
-def _simplify_codec(codec: str) -> str:
-    if codec in ("subrip", "mov_text"):
-        return "srt"
-    if codec in ("ass", "ssa"):
-        return "ass"
-    if codec == "webvtt":
-        return "vtt"
-    if codec in ("dvd_subtitle", "hdmv_pgs_subtitle", "dvb_subtitle"):
-        return "image"
-    return codec
+    Args:
+        path: file or directory to probe
+        input_type: "vid" or "sub"
+        scan_mode: "sample" or "recursive"
+        filter_pattern: filename filter substring
+        outputs: comma-separated output types (tracks, styles, tags)
+
+    Returns:
+        Results dict (structure depends on input_type)
+    """
+    output_parts = [o.strip() for o in outputs.split(",")]
+    show_tags = "tags" in output_parts
+
+    # Discover files
+    mode = "vid" if input_type == "vid" else "sub"
+    files = discover_files(path, mode=mode, scan_mode=scan_mode, filter_pattern=filter_pattern)
+
+    if not files:
+        kind = "video" if input_type == "vid" else "subtitle"
+        print(f"No {kind} files found in: {path}")
+        if filter_pattern:
+            print(f"  (filter: '{filter_pattern}')")
+        return {}
+
+    print(SEP)
+    print(f"PROBE - {len(files)} file(s) [{input_type}] [{scan_mode}]")
+    if filter_pattern:
+        print(f"  Filter: '{filter_pattern}'")
+    print(SEP)
+
+    # Run probe
+    if input_type == "vid":
+        results = _probe_video_files(files, show_tags=show_tags)
+    else:
+        results = _probe_subtitle_files(files, show_tags=show_tags)
+
+    print(SEP)
+    print(f"PROBE COMPLETE - {len(results)} files analyzed")
+
+    # Summary for subtitle probe
+    if input_type == "sub":
+        all_styles = set()
+        all_tags = set()
+        for info in results.values():
+            if isinstance(info, dict):
+                all_styles.update(info.get("styles", []))
+                all_tags.update(info.get("tags", []))
+        if all_styles:
+            print(f"  All styles: {', '.join(sorted(all_styles))}")
+        if show_tags and all_tags:
+            print(f"  All tags: {', '.join(sorted(all_tags))}")
+
+    return results
