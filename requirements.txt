@@ -1,0 +1,5 @@
+httpx
+pysubs2
+json-repair
+fonttools
+brotli
