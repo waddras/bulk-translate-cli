@@ -23,6 +23,8 @@ env/
 .DS_Store
 Thumbs.db
 
-# Project-specific
+# Project-specific — translated outputs
 *.ar.srt
 *.ar.ass
+*.fr.srt
+*.fr.ass

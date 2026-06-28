@@ -1,63 +1,55 @@
 #!/usr/bin/env python3
 """CLI entry point for bulk-translate-cli.
 
-Usage:
-    python -m btcli probe /path/to/mkv/folder
-    python -m btcli extract /path/to/folder --track 0 --suffix ".en"
-    python -m btcli translate /path/to/subs/folder
-    python -m btcli translate file1.srt file2.ass
-    python -m btcli styles /path/to/ass/files
-    python -m btcli list /path/to/folder
+Two subcommands:
+    btcli probe    — inspect files for subtitle tracks, styles, tags
+    btcli translate — full translation pipeline
 """
 import argparse
 import sys
 
 from . import __version__
-from .config import cfg
-from .discover import discover_files, list_files
 
 
 def _parse_args():
     parser = argparse.ArgumentParser(
         prog="btcli",
-        description="Bulk subtitle translation CLI (English → Arabic)",
+        description="Bulk subtitle translation CLI",
     )
     parser.add_argument("--version", action="version", version=f"btcli {__version__}")
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
-    # ── probe ──
-    p_probe = sub.add_parser("probe", help="Probe MKV files for subtitle tracks")
-    p_probe.add_argument("path", help="File or directory to probe")
-    p_probe.add_argument("-r", "--recursive", action="store_true")
+    # ── probe ─────────────────────────────────────────────────────────────────
+    p_probe = sub.add_parser("probe", help="Probe files for subtitle tracks, styles, and tags")
+    p_probe.add_argument("-p", required=True, help="Path (file or directory)")
+    p_probe.add_argument("-i", default="vid", choices=["vid", "sub"],
+                         help="Input type: vid (video files) or sub (subtitle files). Default: vid")
+    p_probe.add_argument("-m", default="sample", choices=["sample", "recursive"],
+                         help="Mode: sample (one per subdir) or recursive (all). Default: sample")
+    p_probe.add_argument("-f", default=None, metavar="FILTER",
+                         help="Filter by filename pattern (substring match)")
+    p_probe.add_argument("-o", default="tracks,styles", metavar="OUTPUTS",
+                         help="Output info: tracks,styles,tags (comma-separated). Default: tracks,styles")
 
-    # ── extract ──
-    p_extract = sub.add_parser("extract", help="Extract subtitle track from MKV files")
-    p_extract.add_argument("path", help="File or directory")
-    p_extract.add_argument("-t", "--track", type=int, default=0, help="Track index (default: 0)")
-    p_extract.add_argument("-s", "--suffix", default=".en", help="Output suffix (default: .en)")
-    p_extract.add_argument("--to-srt", action="store_true", help="Convert ASS to SRT after extract")
-    p_extract.add_argument("-r", "--recursive", action="store_true")
-
-    # ── translate ──
+    # ── translate ─────────────────────────────────────────────────────────────
     p_trans = sub.add_parser("translate", help="Translate subtitle files (full pipeline)")
-    p_trans.add_argument("path", nargs="+", help="File(s) or directory to translate")
-    p_trans.add_argument("-r", "--recursive", action="store_true")
-    p_trans.add_argument("--styles", nargs="*", help="Keep only these ASS styles")
-    p_trans.add_argument("--show-name", default="", help="Override auto-detected show name")
-
-    # ── styles ──
-    p_styles = sub.add_parser("styles", help="Detect ASS styles in subtitle files")
-    p_styles.add_argument("path", help="File or directory")
-    p_styles.add_argument("-r", "--recursive", action="store_true")
-
-    # ── list ──
-    p_list = sub.add_parser("list", help="List discovered files")
-    p_list.add_argument("path", help="Directory to scan")
-    p_list.add_argument("-m", "--mode", choices=["translate", "extract"], default="translate")
-    p_list.add_argument("-r", "--recursive", action="store_true")
+    p_trans.add_argument("-p", required=True, help="Path (file or directory)")
+    p_trans.add_argument("-l", default="arabic", metavar="LANG",
+                         help="Target language, or 'source,target' pair. Default: arabic")
+    p_trans.add_argument("-i", default="sub", choices=["vid", "sub"],
+                         help="Input type: vid (extract from video) or sub (subtitle files). Default: sub")
+    p_trans.add_argument("-f", default=None, metavar="FILTER",
+                         help="Filter by filename pattern (substring match)")
+    p_trans.add_argument("-t", default="0", metavar="TRACKS",
+                         help="Track number(s) to extract, comma-separated (only with -i vid). Default: 0")
+    p_trans.add_argument("-suffix", default=None, metavar="SUFFIX",
+                         help="Output filename suffix. Default: auto from target lang (e.g. .ar)")
+    p_trans.add_argument("-o", default=None, choices=["srt"],
+                         help="Force output format: srt (force SRT from ASS source)")
+    p_trans.add_argument("--show-name", default="", metavar="NAME",
+                         help="Override auto-detected show name for translation prompt")
 
     return parser.parse_args()
-
 
 
 def main():
@@ -65,61 +57,35 @@ def main():
 
     if not args.command:
         print("No command specified. Use --help for usage.")
+        print("\nCommands:")
+        print("  btcli probe -p <path> [-i vid|sub] [-m sample|recursive] [-f filter] [-o outputs]")
+        print("  btcli translate -p <path> [-l lang] [-i vid|sub] [-f filter] [-t tracks] [-suffix .ar] [-o srt]")
         sys.exit(1)
 
-    if args.command == "list":
-        list_files(args.path, args.mode, args.recursive)
-
-    elif args.command == "probe":
+    if args.command == "probe":
         from .probe import run_probe
-        files = discover_files(args.path, mode="extract", recursive=args.recursive)
-        if not files:
-            print(f"No MKV files found in: {args.path}")
-            sys.exit(1)
-        run_probe([str(f) for f in files])
-
-    elif args.command == "extract":
-        from .probe import run_extract
-        files = discover_files(args.path, mode="extract", recursive=args.recursive)
-        if not files:
-            print(f"No MKV files found in: {args.path}")
-            sys.exit(1)
-        run_extract([str(f) for f in files], args.track, args.suffix, args.to_srt)
-
-    elif args.command == "styles":
-        from .translate import get_styles_from_files
-        files = discover_files(args.path, mode="translate", recursive=args.recursive)
-        if not files:
-            print(f"No subtitle files found in: {args.path}")
-            sys.exit(1)
-        styles = get_styles_from_files([str(f) for f in files])
-        if styles:
-            print(f"Found {len(styles)} style(s):")
-            for s in styles:
-                print(f"  - {s}")
-        else:
-            print("No ASS styles found (files may be SRT format)")
+        run_probe(
+            path=args.p,
+            input_type=args.i,
+            scan_mode=args.m,
+            filter_pattern=args.f,
+            outputs=args.o,
+        )
 
     elif args.command == "translate":
         from .translate import run_translate
-        # Collect all file paths from arguments
-        all_files = []
-        for p in args.path:
-            found = discover_files(p, mode="translate", recursive=args.recursive)
-            all_files.extend(found)
-        if not all_files:
-            print(f"No subtitle files found in: {args.path}")
-            sys.exit(1)
-        # Deduplicate while preserving order
-        seen = set()
-        unique_files = []
-        for f in all_files:
-            if f not in seen:
-                seen.add(f)
-                unique_files.append(f)
+
+        # Parse track indices
+        track_indices = [int(t.strip()) for t in args.t.split(",") if t.strip()]
+
         run_translate(
-            [str(f) for f in unique_files],
-            keep_styles=args.styles,
+            path=args.p,
+            lang=args.l,
+            input_type=args.i,
+            filter_pattern=args.f,
+            track_indices=track_indices,
+            suffix=args.suffix,
+            force_srt=(args.o == "srt"),
             show_name=args.show_name,
         )
 

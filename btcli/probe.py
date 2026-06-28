@@ -1,153 +1,177 @@
-"""Probe flow: inspect MKV files for subtitle tracks and extract them."""
-import json
-import subprocess
+"""Probe flow: inspect video/subtitle files for tracks, styles, and tags.
+
+Supports:
+  - -i vid: probe video files for subtitle tracks (via ffprobe)
+  - -i sub: probe subtitle files for styles and tags
+  - -m sample/recursive: discovery mode
+  - -o tracks,styles,tags: what info to output
+"""
 from pathlib import Path
 
 from .config import cfg
+from .discover import discover_files
+from .extract import probe_tracks
+from .srt_pre import get_styles_from_file, scan_tags_from_file
+
+SEP = "=" * 60
 
 
-def probe_file(filepath: str) -> list:
-    """Probe an MKV file and return its subtitle tracks.
+# ── Probe Video Files ─────────────────────────────────────────────────────────
 
-    Returns list of dicts: [{index, stream_index, codec, language, title}, ...]
+def _probe_video_files(files: list, show_tags: bool = False) -> dict:
+    """Probe video files for subtitle tracks.
+
+    Args:
+        files: list of Path objects to video files
+        show_tags: if True, extract a track and scan for ASS tags
+
+    Returns:
+        {filepath: [tracks]} dict
     """
-    cmd = [
-        "ffprobe", "-v", "quiet",
-        "-print_format", "json",
-        "-show_streams",
-        "-select_streams", "s",
-        str(filepath),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed: {result.stderr.strip()}")
-
-    data = json.loads(result.stdout)
-    tracks = []
-    for i, stream in enumerate(data.get("streams", [])):
-        tracks.append({
-            "index": i,
-            "stream_index": stream.get("index"),
-            "codec": stream.get("codec_name", "unknown"),
-            "language": stream.get("tags", {}).get("language", "und"),
-            "title": stream.get("tags", {}).get("title", ""),
-        })
-    return tracks
-
-
-def extract_subtitle(filepath: str, track_index: int, suffix: str,
-                     codec: str = "ass", convert_to_srt: bool = False) -> str:
-    """Extract a single subtitle track from an MKV using -c:s copy.
-
-    Returns: path to the extracted subtitle file.
-    """
-    if codec in ("ass", "ssa"):
-        ext = "ass"
-    else:
-        ext = "srt"
-
-    fpath = Path(filepath)
-    out_name = fpath.stem + suffix + "." + ext
-    out_path = fpath.parent / out_name
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(fpath),
-        "-map", f"0:s:{track_index}",
-        "-c:s", "copy",
-        str(out_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
-        err = result.stderr.strip()
-        raise RuntimeError(f"ffmpeg extraction failed: {err[-300:]}")
-
-    # Convert to SRT if requested and source was ASS
-    if convert_to_srt and ext == "ass":
-        srt_path = out_path.with_suffix(".srt")
-        convert_cmd = [
-            "ffmpeg", "-y",
-            "-i", str(out_path),
-            "-c:s", "srt",
-            str(srt_path),
-        ]
-        conv_result = subprocess.run(convert_cmd, capture_output=True, text=True, timeout=60)
-        if conv_result.returncode == 0:
-            out_path.unlink()
-            return str(srt_path)
-
-    return str(out_path)
-
-
-def run_probe(file_paths: list) -> dict:
-    """Probe all MKV files and print track info.
-
-    Returns {filepath: [tracks]} dict.
-    """
-    print(f"{'=' * 60}")
-    print(f"PROBE - {len(file_paths)} file(s)")
-    print(f"{'=' * 60}")
-
     results = {}
-    for i, fp in enumerate(file_paths, 1):
-        fpath = Path(fp)
+
+    for i, fpath in enumerate(files, 1):
+        fpath = Path(fpath)
         if not fpath.exists():
             print(f"  [{i:02d}] {fpath.name} - NOT FOUND")
             continue
+
         try:
-            tracks = probe_file(str(fp))
-            results[str(fp)] = tracks
+            tracks = probe_tracks(str(fpath))
+            results[str(fpath)] = tracks
             print(f"  [{i:02d}] {fpath.name}:")
+
             if not tracks:
                 print(f"        No subtitle tracks found")
+                continue
+
             for t in tracks:
                 title = f' "{t["title"]}"' if t["title"] else ""
                 print(f"        Track {t['index']}: [{t['language']}] ({t['codec']}){title}")
+
+            # If tags requested, extract first track and scan
+            if show_tags and tracks:
+                try:
+                    from .extract import extract_track
+                    import tempfile
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        tmp_out = str(Path(tmpdir) / "probe_tags.ass")
+                        extracted = extract_track(str(fpath), 0, tmp_out)
+                        tags = scan_tags_from_file(extracted)
+                        if tags:
+                            print(f"        Tags (track 0): {', '.join(sorted(tags))}")
+                except Exception as e:
+                    print(f"        Tags: could not scan ({e})")
+
         except Exception as e:
             print(f"  [{i:02d}] {fpath.name} - ERROR: {e}")
-            results[str(fp)] = []
+            results[str(fpath)] = []
 
-    print(f"{'=' * 60}")
-    print(f"PROBE COMPLETE - {len(results)} files analyzed")
     return results
 
 
-def run_extract(file_paths: list, track_index: int, suffix: str,
-                convert_to_srt: bool = False) -> None:
-    """Extract subtitle track from all MKV files."""
-    print(f"{'=' * 60}")
-    print(f"EXTRACT - {len(file_paths)} files, track {track_index}, suffix: '{suffix}'")
+# ── Probe Subtitle Files ──────────────────────────────────────────────────────
 
-    # Determine codec from first file
-    codec = "ass"
-    try:
-        tracks = probe_file(file_paths[0])
-        if track_index < len(tracks):
-            codec = tracks[track_index].get("codec", "ass")
-    except Exception:
-        pass
+def _probe_subtitle_files(files: list, show_tags: bool = False) -> dict:
+    """Probe subtitle files for styles and optionally tags.
 
-    ext = "ass" if codec in ("ass", "ssa") else "srt"
-    print(f"Source codec: {codec} -> output: .{ext}")
-    if convert_to_srt and ext == "ass":
-        print(f"Will convert to SRT after extraction")
-    print(f"{'=' * 60}")
+    Args:
+        files: list of Path objects to subtitle files
+        show_tags: if True, also scan for unique ASS override tags
 
-    completed, failed = [], []
-    for i, fp in enumerate(file_paths, 1):
-        fpath = Path(fp)
-        print(f"  [{i:02d}/{len(file_paths)}] {fpath.name}")
-        try:
-            out = extract_subtitle(str(fp), track_index, suffix, codec, convert_to_srt)
-            print(f"        -> {Path(out).name}")
-            completed.append(Path(out).name)
-        except Exception as e:
-            print(f"        ERROR: {e}")
-            failed.append(fpath.name)
+    Returns:
+        {filepath: {styles: [...], tags: [...]}} dict
+    """
+    results = {}
 
-    print(f"{'=' * 60}")
-    print(f"EXTRACT COMPLETE - {len(completed)} extracted, {len(failed)} failed")
-    for f in completed:
-        print(f"  done: {f}")
-    for f in failed:
-        print(f"  FAILED: {f}")
+    for i, fpath in enumerate(files, 1):
+        fpath = Path(fpath)
+        if not fpath.exists():
+            print(f"  [{i:02d}] {fpath.name} - NOT FOUND")
+            continue
+
+        info = {"styles": [], "tags": []}
+
+        # Styles
+        styles = get_styles_from_file(fpath)
+        info["styles"] = styles
+
+        # Tags
+        if show_tags:
+            tags = scan_tags_from_file(fpath)
+            info["tags"] = sorted(tags)
+
+        results[str(fpath)] = info
+
+        # Print
+        size_kb = fpath.stat().st_size / 1024
+        print(f"  [{i:02d}] {fpath.name}  ({size_kb:.1f} KB)")
+        if styles:
+            print(f"        Styles: {', '.join(styles)}")
+        else:
+            print(f"        Styles: (none / SRT format)")
+        if show_tags and info["tags"]:
+            print(f"        Tags: {', '.join(info['tags'])}")
+
+    return results
+
+
+# ── Main Probe Runner ─────────────────────────────────────────────────────────
+
+def run_probe(path: str, input_type: str = "vid", scan_mode: str = "sample",
+              filter_pattern: str | None = None, outputs: str = "tracks,styles") -> dict:
+    """Run the probe flow.
+
+    Args:
+        path: file or directory to probe
+        input_type: "vid" or "sub"
+        scan_mode: "sample" or "recursive"
+        filter_pattern: filename filter substring
+        outputs: comma-separated output types (tracks, styles, tags)
+
+    Returns:
+        Results dict (structure depends on input_type)
+    """
+    output_parts = [o.strip() for o in outputs.split(",")]
+    show_tags = "tags" in output_parts
+
+    # Discover files
+    mode = "vid" if input_type == "vid" else "sub"
+    files = discover_files(path, mode=mode, scan_mode=scan_mode, filter_pattern=filter_pattern)
+
+    if not files:
+        kind = "video" if input_type == "vid" else "subtitle"
+        print(f"No {kind} files found in: {path}")
+        if filter_pattern:
+            print(f"  (filter: '{filter_pattern}')")
+        return {}
+
+    print(SEP)
+    print(f"PROBE - {len(files)} file(s) [{input_type}] [{scan_mode}]")
+    if filter_pattern:
+        print(f"  Filter: '{filter_pattern}'")
+    print(SEP)
+
+    # Run probe
+    if input_type == "vid":
+        results = _probe_video_files(files, show_tags=show_tags)
+    else:
+        results = _probe_subtitle_files(files, show_tags=show_tags)
+
+    print(SEP)
+    print(f"PROBE COMPLETE - {len(results)} files analyzed")
+
+    # Summary for subtitle probe
+    if input_type == "sub":
+        all_styles = set()
+        all_tags = set()
+        for info in results.values():
+            if isinstance(info, dict):
+                all_styles.update(info.get("styles", []))
+                all_tags.update(info.get("tags", []))
+        if all_styles:
+            print(f"  All styles: {', '.join(sorted(all_styles))}")
+        if show_tags and all_tags:
+            print(f"  All tags: {', '.join(sorted(all_tags))}")
+
+    return results
