@@ -24,11 +24,12 @@ _SEARCH_PATHS = [
 DEFAULT_SETTINGS = {
     # API
     "GEMINI_API_KEY": "",
-    "GEMINI_MODEL": "gemini-2.5-flash",
+    "GEMINI_MODEL": "gemini-3.1-flash-lite",
     "MODEL_POOL": [
+        "gemini-3.1-flash-lite",
         "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-3.5-flash",
     ],
     "GEMINI_MAX_OUTPUT_TOKENS": 0,
 

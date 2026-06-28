@@ -112,7 +112,7 @@ def _generation_config() -> dict:
 def _get_model_for_attempt(attempt: int) -> str:
     """Cycle through MODEL_POOL on retries."""
     pool = cfg.get("MODEL_POOL", [])
-    primary = cfg.get("GEMINI_MODEL", "gemini-2.5-flash")
+    primary = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
     if not pool:
         return primary
     if attempt <= 1:
@@ -184,7 +184,7 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
         for i, chunk in enumerate(batch):
             chunk_num = batch_start + i + 1
             est = estimate_output_tokens(chunk)
-            model = cfg.get("GEMINI_MODEL", "gemini-2.5-flash")
+            model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
             log.chunk_status(chunk_num, total, len(chunk), est, model)
 
             prompt = _build_prompt(chunk, show_name, source_lang, target_lang)
@@ -219,7 +219,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
     import json_repair
 
     translated = {}
-    model = cfg.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
     gen_cfg = _generation_config()
     retry_attempts = cfg.get("RETRY_ATTEMPTS", 5)
     retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
@@ -302,7 +302,7 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
 
     for chunk_num, chunk in enumerate(chunks, 1):
         est = estimate_output_tokens(chunk)
-        model = cfg.get("GEMINI_MODEL", "gemini-2.5-flash")
+        model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
         log.chunk_status(chunk_num, len(chunks), len(chunk), est, f"{model} (full context)")
 
         keys = list(chunk.keys())
