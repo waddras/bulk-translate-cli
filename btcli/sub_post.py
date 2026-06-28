@@ -191,11 +191,11 @@ def embed_font_in_ass(ass_content: str, font_path: str | None = None) -> str:
         + "\n"
     )
 
-    # Insert before [Events] section
-    if "[Events]" in ass_content:
-        ass_content = ass_content.replace("[Events]", font_section + "[Events]")
-    else:
+    # Insert at end of file
+    if ass_content.endswith("\n"):
         ass_content += font_section
+    else:
+        ass_content += "\n" + font_section
 
     return ass_content
 
