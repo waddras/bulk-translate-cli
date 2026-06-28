@@ -124,9 +124,12 @@ def run_translate(
         log.info(f"Extracting track(s): {tracks}")
         log.sep()
 
+        # Extract with source language suffix so the file is kept
+        source_suffix = get_suffix_for_lang(source_lang)
         sub_files = extract_from_videos(
             [str(f) for f in video_files],
             tracks,
+            suffix=source_suffix,
             force_srt=force_srt,
         )
         if not sub_files:

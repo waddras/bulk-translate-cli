@@ -21,12 +21,15 @@ SEP = "=" * 60
 
 # ── Probe Video Files ─────────────────────────────────────────────────────────
 
-def _probe_video_files(files: list, show_tags: bool = False) -> dict:
+def _probe_video_files(files: list, show_tags: bool = False, show_styles: bool = False) -> dict:
     """Probe video files for subtitle tracks.
+
+    In sample mode (show_styles=True), extracts each track to scan styles.
 
     Args:
         files: list of Path objects to video files
-        show_tags: if True, extract a track and scan for ASS tags
+        show_tags: if True, scan for ASS tags
+        show_styles: if True, extract each track and report styles
 
     Returns:
         {filepath: [tracks]} dict
@@ -48,23 +51,32 @@ def _probe_video_files(files: list, show_tags: bool = False) -> dict:
                 log.detail(f"        No subtitle tracks found")
                 continue
 
+            # For each track, show info + optionally styles/tags
             for t in tracks:
                 title = f' "{t["title"]}"' if t["title"] else ""
-                log.info(f"        Track {t['index']}: [{t['language']}] ({t['codec']}){title}")
+                track_line = f"        Track {t['index']}: [{t['language']}] ({t['codec']}){title}"
 
-            # If tags requested, extract first track and scan
-            if show_tags and tracks:
-                try:
-                    from .extract import extract_track
-                    import tempfile
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        tmp_out = str(Path(tmpdir) / "probe_tags.ass")
-                        extracted = extract_track(str(fpath), 0, tmp_out)
-                        tags = scan_tags_from_file(extracted)
-                        if tags:
-                            log.info(f"        Tags (track 0): {', '.join(sorted(tags))}")
-                except Exception as e:
-                    log.detail(f"        Tags: could not scan ({e})")
+                if show_styles or show_tags:
+                    try:
+                        from .extract import extract_track
+                        import tempfile
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            tmp_out = str(Path(tmpdir) / f"probe_track{t['index']}.ass")
+                            extracted = extract_track(str(fpath), t['index'], tmp_out)
+
+                            if show_styles:
+                                styles = get_styles_from_file(extracted)
+                                if styles:
+                                    track_line += f" — Styles: {', '.join(styles)}"
+
+                            if show_tags:
+                                tags = scan_tags_from_file(extracted)
+                                if tags:
+                                    track_line += f" — Tags: {', '.join(sorted(tags))}"
+                    except Exception as e:
+                        log.detail(f"        (could not extract track {t['index']}: {e})")
+
+                log.info(track_line)
 
         except Exception as e:
             log.item(f"[{i:02d}] {fpath.name} - ERROR: {e}")
@@ -157,7 +169,9 @@ def run_probe(path: str, input_type: str = "vid", scan_mode: str = "sample",
 
     # Run probe
     if input_type == "vid":
-        results = _probe_video_files(files, show_tags=show_tags)
+        # In sample mode, also extract and show styles per track
+        show_styles = (scan_mode == "sample")
+        results = _probe_video_files(files, show_tags=show_tags, show_styles=show_styles)
     else:
         results = _probe_subtitle_files(files, show_tags=show_tags)
 
