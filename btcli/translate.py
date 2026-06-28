@@ -22,7 +22,56 @@ from .config import cfg, get_lang_code, get_suffix_for_lang
 from .discover import discover_files
 from .extract import extract_from_videos
 from .logger import log
+from .srt_pre import parse_subtitle_file
 from .sub_post import reassemble_files
+
+
+# ── Auto Style Detection ──────────────────────────────────────────────────────
+
+def _auto_detect_styles(files: list) -> list | None:
+    """Auto-detect top N styles by unique line count across all files.
+
+    Returns list of style names to keep, or None if files are SRT (no styles).
+    """
+    import pysubs2
+
+    top_n = cfg.get("KEEP_TOP_STYLES", 2)
+    style_unique_lines: dict = {}  # {style_name: set of unique texts}
+
+    for fpath in files:
+        try:
+            subs = pysubs2.SSAFile.load(str(fpath))
+        except Exception:
+            continue
+
+        # If no styles (SRT), skip auto-detection
+        if not subs.styles or len(subs.styles) <= 1:
+            continue
+
+        for event in subs:
+            style = getattr(event, "style", "Default")
+            if style not in style_unique_lines:
+                style_unique_lines[style] = set()
+            text = event.text.strip()
+            if text:
+                style_unique_lines[style].add(text)
+
+    if not style_unique_lines:
+        return None  # No styles found (SRT files or single style)
+
+    if len(style_unique_lines) <= top_n:
+        return None  # Fewer styles than threshold, keep all
+
+    # Sort by unique line count descending, pick top N
+    sorted_styles = sorted(style_unique_lines.items(), key=lambda x: len(x[1]), reverse=True)
+    kept = [name for name, _ in sorted_styles[:top_n]]
+
+    # Log what was dropped
+    dropped = [f"{name} ({len(lines)} lines)" for name, lines in sorted_styles[top_n:]]
+    if dropped:
+        log.detail(f"  Dropped styles: {', '.join(dropped)}")
+
+    return kept
 
 
 # ── Show Name Detection ───────────────────────────────────────────────────────
@@ -81,6 +130,7 @@ def run_translate(
     suffix: str | None = None,
     force_srt: bool = False,
     show_name: str = "",
+    keep_styles: list | None = None,
 ) -> None:
     """Run the full translation pipeline.
 
@@ -158,7 +208,15 @@ def run_translate(
     # Phase 1: Build blob
     log.sep()
     log.phase("PHASE 1 - Building blob...")
-    meta, payload, stats = build_blob(files)
+
+    # Auto-detect top styles if not specified by user
+    if keep_styles is None:
+        keep_styles = _auto_detect_styles(files)
+
+    if keep_styles:
+        log.info(f"Styles kept: {', '.join(keep_styles)}")
+
+    meta, payload, stats = build_blob(files, keep_styles=keep_styles)
     if stats["total"] == 0:
         log.error("No dialogue cues found in selected files.")
         return

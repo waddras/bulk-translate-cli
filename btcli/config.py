@@ -76,6 +76,7 @@ DEFAULT_SETTINGS = {
 
     # Tags
     "PRESERVE_TAGS": "pos, an, move, fad, fade;",
+    "KEEP_TOP_STYLES": 2,
 
     # Discovery
     "SOURCE_EXTENSIONS": [".srt", ".ass", ".ssa"],

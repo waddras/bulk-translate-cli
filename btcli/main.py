@@ -62,6 +62,8 @@ def _parse_args():
                          help="Filter by filename pattern (substring match)")
     p_trans.add_argument("-t", default="0", metavar="TRACKS",
                          help="Track number(s) to extract, comma-separated (only with -i vid). Default: 0")
+    p_trans.add_argument("-s", "--styles", default=None, metavar="STYLES",
+                         help="Keep only these ASS styles (comma-separated names). Default: auto-pick top N by unique line count")
     p_trans.add_argument("-suffix", default=None, metavar="SUFFIX",
                          help="Output filename suffix. Default: auto from target lang (e.g. .ar)")
     p_trans.add_argument("-o", default=None, choices=["srt"],
@@ -115,6 +117,11 @@ def main():
         # Parse track indices
         track_indices = [int(t.strip()) for t in args.t.split(",") if t.strip()]
 
+        # Parse styles
+        styles = None
+        if args.styles:
+            styles = [s.strip() for s in args.styles.split(",") if s.strip()]
+
         run_translate(
             path=args.p,
             lang=args.l,
@@ -124,6 +131,7 @@ def main():
             suffix=args.suffix,
             force_srt=(args.o == "srt"),
             show_name=args.show_name,
+            keep_styles=styles,
         )
 
     log.close()
