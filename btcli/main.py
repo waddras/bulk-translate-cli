@@ -56,8 +56,8 @@ def _parse_args():
     p_trans.add_argument("-p", required=True, help="Path (file or directory)")
     p_trans.add_argument("-l", default="arabic", metavar="LANG",
                          help="Target language, or 'source,target' pair. Default: arabic")
-    p_trans.add_argument("-i", default="sub", choices=["vid", "sub"],
-                         help="Input type: vid (extract from video) or sub (subtitle files). Default: sub")
+    p_trans.add_argument("-i", default="vid", choices=["vid", "sub"],
+                         help="Input type: vid (extract from video) or sub (subtitle files). Default: vid")
     p_trans.add_argument("-f", default=None, metavar="FILTER",
                          help="Filter by filename pattern (substring match)")
     p_trans.add_argument("-t", default="0", metavar="TRACKS",

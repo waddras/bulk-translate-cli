@@ -26,7 +26,7 @@ _SEARCH_PATHS = [
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_SETTINGS = {
     # API
-    "GEMINI_API_KEY": "",
+    "GEMINI_API_KEY_FILE": "~/.btcli.env",
     "GEMINI_MODEL": "gemini-3.1-flash-lite",
     "MODEL_POOL": [
         "gemini-3.1-flash-lite",
@@ -140,6 +140,25 @@ def load_settings() -> dict:
     env_key = os.environ.get("GEMINI_API_KEY", "")
     if env_key:
         merged["GEMINI_API_KEY"] = env_key
+    else:
+        # Load from key file
+        key_file = Path(os.path.expanduser(merged.get("GEMINI_API_KEY_FILE", "~/.btcli.env")))
+        if key_file.exists():
+            try:
+                content = key_file.read_text().strip()
+                for line in content.splitlines():
+                    line = line.strip()
+                    if line.startswith("GEMINI_API_KEY="):
+                        merged["GEMINI_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+                    elif line and not line.startswith("#"):
+                        # Bare key (no prefix)
+                        merged["GEMINI_API_KEY"] = line
+                        break
+            except Exception:
+                pass
+        if "GEMINI_API_KEY" not in merged:
+            merged["GEMINI_API_KEY"] = ""
     return merged
 
 

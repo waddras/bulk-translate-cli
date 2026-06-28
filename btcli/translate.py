@@ -102,8 +102,10 @@ def run_translate(
     # API key check
     api_key = cfg.get("GEMINI_API_KEY", "")
     if not api_key:
-        log.error("No API key. Set GEMINI_API_KEY in settings.conf or environment.")
-        return
+        from .setup_key import check_api_key
+        api_key = check_api_key()
+        if not api_key:
+            return
 
     log.sep()
     log.phase(f"TRANSLATE - {source_lang} → {target_lang}")
