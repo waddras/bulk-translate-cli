@@ -31,12 +31,17 @@ from .sub_post import reassemble_files
 def _auto_detect_styles(files: list) -> list | None:
     """Auto-detect top N styles by unique line count across all files.
 
+    Uses same cleaning logic as srt_pre (strip tags, normalize newlines)
+    so that lines differing only in positioning tags collapse properly.
+
     Returns list of style names to keep, or None if files are SRT (no styles).
     """
     import pysubs2
+    from .srt_pre import _clean_event_text, _should_drop
 
     top_n = cfg.get("KEEP_TOP_STYLES", 2)
-    style_unique_lines: dict = {}  # {style_name: set of unique texts}
+    style_unique_lines: dict = {}  # {style_name: set of cleaned unique texts}
+    style_total_lines: dict = {}   # {style_name: total event count}
 
     for fpath in files:
         try:
@@ -52,9 +57,15 @@ def _auto_detect_styles(files: list) -> list | None:
             style = getattr(event, "style", "Default")
             if style not in style_unique_lines:
                 style_unique_lines[style] = set()
-            text = event.text.strip()
-            if text:
-                style_unique_lines[style].add(text)
+                style_total_lines[style] = 0
+
+            # Clean text same way as srt_pre does
+            clean = _clean_event_text(event.text)
+            if _should_drop(clean):
+                continue
+
+            style_total_lines[style] += 1
+            style_unique_lines[style].add(clean)
 
     if not style_unique_lines:
         return None  # No styles found (SRT files or single style)
@@ -66,10 +77,17 @@ def _auto_detect_styles(files: list) -> list | None:
     sorted_styles = sorted(style_unique_lines.items(), key=lambda x: len(x[1]), reverse=True)
     kept = [name for name, _ in sorted_styles[:top_n]]
 
+    # Log all styles with counts
+    for name, lines in sorted_styles:
+        total = style_total_lines.get(name, 0)
+        unique = len(lines)
+        marker = " ✓" if name in kept else ""
+        log.detail(f"  {name}: {total} total, {unique} unique{marker}")
+
     # Log what was dropped
-    dropped = [f"{name} ({len(lines)} lines)" for name, lines in sorted_styles[top_n:]]
+    dropped = [f"{name} ({len(lines)} unique)" for name, lines in sorted_styles[top_n:]]
     if dropped:
-        log.detail(f"  Dropped styles: {', '.join(dropped)}")
+        log.info(f"  Dropped styles: {', '.join(dropped)}")
 
     return kept
 
