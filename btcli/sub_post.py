@@ -37,9 +37,9 @@ AVAILABLE_FONTS = [
 # ── RTL Wrapping ──────────────────────────────────────────────────────────────
 
 def wrap_rtl(text: str) -> str:
-    """Wrap each line with RLI+PDI bidi marks."""
+    """Wrap each line with RLI+PDI bidi marks, using \\N as ASS line break."""
     lines = text.split("\n")
-    return "\n".join(RLI + line + PDI for line in lines)
+    return r"\N".join(RLI + line + PDI for line in lines)
 
 
 # ── Output Path Resolution ────────────────────────────────────────────────────
