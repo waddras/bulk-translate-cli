@@ -14,8 +14,11 @@ import os
 from pathlib import Path
 
 # ── Search paths ──────────────────────────────────────────────────────────────
+_INSTALL_DIR = Path("/opt/bulk-translate-cli")
+
 _SEARCH_PATHS = [
     Path.cwd() / "settings.conf",
+    _INSTALL_DIR / "settings.conf",
     Path.home() / ".config" / "btcli" / "settings.conf",
     Path("/etc/btcli/settings.conf"),
 ]
