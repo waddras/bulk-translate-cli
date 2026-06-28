@@ -10,6 +10,8 @@ Also handles:
   - Retry with context for missing keys
   - Model pool cycling on retries
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import time

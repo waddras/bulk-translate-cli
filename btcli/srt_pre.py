@@ -7,6 +7,8 @@ Responsibilities:
   - Scan for unique tag names (for probe -o tags)
   - Style detection
 """
+from __future__ import annotations
+
 import re
 from pathlib import Path
 

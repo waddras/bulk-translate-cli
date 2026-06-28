@@ -9,6 +9,8 @@ Pipeline:
   6. Reassemble output files
   7. Report results
 """
+from __future__ import annotations
+
 import asyncio
 import re
 from collections import Counter

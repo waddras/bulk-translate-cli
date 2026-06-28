@@ -5,6 +5,8 @@ Responsibilities:
   - Extract single or multiple tracks via ffmpeg
   - Combine multiple tracks into one subtitle file (concatenate events by timestamp)
 """
+from __future__ import annotations
+
 import json
 import subprocess
 import tempfile

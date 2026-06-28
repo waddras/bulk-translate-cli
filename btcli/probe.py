@@ -6,6 +6,8 @@ Supports:
   - -m sample/recursive: discovery mode
   - -o tracks,styles,tags: what info to output
 """
+from __future__ import annotations
+
 from pathlib import Path
 
 from .config import cfg

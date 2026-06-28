@@ -4,6 +4,8 @@ The blob is a dict of {tag: text} where:
   - tag format: FFLLLL (FF = file index, LLLL = line index within file)
   - Duplicate lines across files share the same "rep" tag (translated once)
 """
+from __future__ import annotations
+
 from pathlib import Path
 
 from .config import cfg

@@ -9,7 +9,8 @@ Discovery logic:
   - Skips directories in SKIP_DIRS config list
   - Filter: match substring pattern in filename (e.g. ".en.ass")
 """
-import random
+from __future__ import annotations
+
 from pathlib import Path
 
 from .config import cfg
