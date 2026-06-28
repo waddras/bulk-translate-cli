@@ -64,7 +64,7 @@ DEFAULT_SETTINGS = {
 
     # Output
     "FILE_CONFLICT": "overwrite",
-    "EMBED_FONT": False,
+    "EMBED_FONT": True,
     "FONT_NAME": "Noto Sans Arabic",
     "FONT_SIZE": 18,
     "FONT_OUTLINE": 1,

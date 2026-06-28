@@ -143,24 +143,30 @@ def embed_font_in_ass(ass_content: str, font_path: str | None = None) -> str:
         ASS content with embedded font section
     """
     if not font_path:
-        # Try common system font paths
-        font_name = cfg.get("FONT_NAME", "Amiri")
-        search_paths = [
-            Path.home() / ".fonts",
-            Path.home() / ".local" / "share" / "fonts",
-            Path("/usr/share/fonts"),
-            Path("/usr/local/share/fonts"),
-        ]
-        for search_dir in search_paths:
-            if not search_dir.exists():
-                continue
-            for fp in search_dir.rglob("*"):
-                if font_name.lower().replace(" ", "") in fp.stem.lower().replace(" ", ""):
-                    if fp.suffix.lower() in (".ttf", ".otf"):
-                        font_path = str(fp)
-                        break
-            if font_path:
-                break
+        # Check bundled font in install dir first
+        bundled = Path(__file__).resolve().parent.parent / "fonts" / "NotoSansArabic-subset.ttf"
+        if bundled.exists():
+            font_path = str(bundled)
+        else:
+            # Try common system font paths
+            font_name = cfg.get("FONT_NAME", "Noto Sans Arabic")
+            search_paths = [
+                Path("/opt/bulk-translate-cli/fonts"),
+                Path.home() / ".fonts",
+                Path.home() / ".local" / "share" / "fonts",
+                Path("/usr/share/fonts"),
+                Path("/usr/local/share/fonts"),
+            ]
+            for search_dir in search_paths:
+                if not search_dir.exists():
+                    continue
+                for fp in search_dir.rglob("*"):
+                    if font_name.lower().replace(" ", "") in fp.stem.lower().replace(" ", ""):
+                        if fp.suffix.lower() in (".ttf", ".otf"):
+                            font_path = str(fp)
+                            break
+                if font_path:
+                    break
 
     if not font_path or not Path(font_path).exists():
         log.detail("    Warning: Font file not found for embedding, skipping")
