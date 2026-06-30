@@ -188,6 +188,58 @@ def extract_and_combine_tracks(filepath: str, track_indices: list,
     return str(out_path)
 
 
+# ── Track Selection ────────────────────────────────────────────────────────────
+
+# Bitmap/image-based subtitle codecs that can't be extracted as text
+_BITMAP_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
+
+
+def find_first_text_track(filepath: str) -> int | None:
+    """Find the first text-based subtitle track (skip PGS/bitmap).
+
+    Returns track index or None if no text tracks found.
+    """
+    tracks = probe_tracks(filepath)
+    for t in tracks:
+        if t["codec"] not in _BITMAP_CODECS:
+            return t["index"]
+    return None
+
+
+def validate_track_indices(filepath: str, track_indices: list) -> list:
+    """Validate track indices — skip bitmap tracks, auto-select text if needed.
+
+    If all requested tracks are bitmap, auto-selects first text track.
+    Returns valid track indices list.
+    """
+    tracks = probe_tracks(filepath)
+
+    if not tracks:
+        return track_indices  # Let it fail downstream
+
+    # Check if requested tracks are bitmap
+    valid = []
+    for idx in track_indices:
+        if idx < len(tracks):
+            if tracks[idx]["codec"] not in _BITMAP_CODECS:
+                valid.append(idx)
+            else:
+                log.detail(f"    Skipping track {idx}: bitmap format ({tracks[idx]['codec']})")
+
+    if valid:
+        return valid
+
+    # All requested tracks are bitmap — auto-select first text track
+    log.info("    Requested track(s) are bitmap — auto-selecting first text track")
+    first_text = find_first_text_track(filepath)
+    if first_text is not None:
+        log.info(f"    Auto-selected track {first_text} ({tracks[first_text]['codec']})")
+        return [first_text]
+
+    log.warning(f"    No text-based subtitle tracks found")
+    return track_indices  # Let it fail downstream
+
+
 # ── Batch Extraction (for translate flow) ─────────────────────────────────────
 
 def extract_from_videos(video_files: list, track_indices: list,
@@ -209,16 +261,19 @@ def extract_from_videos(video_files: list, track_indices: list,
         fpath = Path(vpath)
         log.item(f"[{i:02d}/{len(video_files)}] {fpath.name}")
 
+        # Validate tracks — skip bitmap, auto-select text
+        valid_tracks = validate_track_indices(str(fpath), track_indices)
+
         # Build output path
         ext = "srt" if force_srt else "ass"
         out_name = fpath.stem + suffix + "." + ext
         out_path = str(fpath.parent / out_name)
 
         try:
-            if len(track_indices) > 1:
-                result = extract_and_combine_tracks(str(fpath), track_indices, out_path, force_srt)
+            if len(valid_tracks) > 1:
+                result = extract_and_combine_tracks(str(fpath), valid_tracks, out_path, force_srt)
             else:
-                result = extract_track(str(fpath), track_indices[0], out_path, force_srt)
+                result = extract_track(str(fpath), valid_tracks[0], out_path, force_srt)
             extracted.append(result)
             log.detail(f"        → {Path(result).name}")
         except Exception as e:

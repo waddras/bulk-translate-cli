@@ -103,17 +103,40 @@ def run_update(merge: bool = False) -> None:
     # Step 3: Merge if requested
     if merge and new_keys:
         if not user_file:
+            # Copy settings.default.conf as user's starting point (preserves comments)
             user_file = _INSTALL_DIR / "settings.conf"
+            if _DEFAULT_SETTINGS_FILE.exists():
+                import shutil
+                shutil.copy2(str(_DEFAULT_SETTINGS_FILE), str(user_file))
+                log.success(f"  Created {user_file} from defaults (with comments)")
+            else:
+                # Fallback: write JSON
+                for key in sorted(new_keys):
+                    user_settings[key] = default_settings[key]
+                user_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(user_file, "w", encoding="utf-8") as f:
+                    json.dump(user_settings, f, indent=2, ensure_ascii=False)
+                log.success(f"  Created {user_file}")
+        else:
+            # User file exists — add new keys with default values
+            # Read raw content to preserve comments
+            raw = user_file.read_text(encoding="utf-8")
 
-        # Add new keys with default values
-        for key in sorted(new_keys):
-            user_settings[key] = default_settings[key]
+            # Build new entries to add before the closing }
+            new_entries = []
+            for key in sorted(new_keys):
+                val = json.dumps(default_settings[key], ensure_ascii=False)
+                new_entries.append(f'  "{key}": {val}')
 
-        # Write back
-        user_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(user_file, "w", encoding="utf-8") as f:
-            json.dump(user_settings, f, indent=2, ensure_ascii=False)
+            # Insert before last }
+            insert_text = ",\n" + ",\n".join(new_entries)
+            last_brace = raw.rfind("}")
+            if last_brace > 0:
+                raw = raw[:last_brace] + insert_text + "\n" + raw[last_brace:]
+                user_file.write_text(raw, encoding="utf-8")
+                log.success(f"  Added {len(new_keys)} new setting(s) to {user_file}")
+            else:
+                log.error("  Could not find closing } in user config")
 
-        log.success(f"  Merged {len(new_keys)} new setting(s) into {user_file}")
     elif new_keys and not merge:
         log.info(f"\n  Run 'btcli update --merge' to add these to your config.")
