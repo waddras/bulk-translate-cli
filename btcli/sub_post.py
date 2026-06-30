@@ -133,7 +133,7 @@ def build_ass_output(blocks: list, source_path: Path | None = None,
         # Clear events — we'll add translated ones
         subs.events.clear()
 
-        # Swap fonts in kept styles
+        # Swap fonts in kept styles and force spacing=0
         if kept_styles:
             top_style = kept_styles[0]
             for style_name, style in subs.styles.items():
@@ -141,14 +141,19 @@ def build_ass_output(blocks: list, source_path: Path | None = None,
                     style.fontname = main_font
                 elif style_name in kept_styles:
                     style.fontname = secondary_font
+                # Force spacing to 0 for Arabic rendering
+                style.spacing = 0
 
             # Remove styles not in kept list
             to_remove = [s for s in subs.styles if s not in kept_styles]
             for s in to_remove:
                 del subs.styles[s]
         else:
-            # No style filtering — just swap font on Default
+            # No style filtering — just swap font on Default and force spacing=0
+            for style_name, style in subs.styles.items():
+                style.spacing = 0
             if "Default" in subs.styles:
+                subs.styles["Default"].fontname = main_font
                 subs.styles["Default"].fontname = main_font
     else:
         # No source — build from scratch
