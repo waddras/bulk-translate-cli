@@ -82,9 +82,7 @@ def _parse_args():
                        help="Save .bak backup before overwriting")
 
     # ── update ────────────────────────────────────────────────────────────────
-    p_update = sub.add_parser("update", help="Pull latest code + check/merge settings")
-    p_update.add_argument("--merge", action="store_true",
-                          help="Add new settings to user config with default values")
+    p_update = sub.add_parser("update", help="Pull latest code + merge new settings")
 
     return parser.parse_args()
 
@@ -162,7 +160,7 @@ def main():
 
     elif args.command == "update":
         from .update import run_update
-        run_update(merge=args.merge)
+        run_update()
 
     log.close()
 
