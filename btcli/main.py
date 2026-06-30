@@ -64,6 +64,8 @@ def _parse_args():
                          help="Track number(s) to extract, comma-separated (only with -i vid). Default: 0")
     p_trans.add_argument("-s", "--styles", default=None, metavar="STYLES",
                          help="Keep only these ASS styles (comma-separated names). Default: auto-pick top N by unique line count")
+    p_trans.add_argument("--passthrough", default=None, metavar="STYLES",
+                         help="Include these styles untranslated (comma-separated names). Kept as-is from source.")
     p_trans.add_argument("-suffix", default=None, metavar="SUFFIX",
                          help="Output filename suffix. Default: auto from target lang (e.g. .ar)")
     p_trans.add_argument("-o", default=None, choices=["srt"],
@@ -137,6 +139,11 @@ def main():
         if args.styles:
             styles = [s.strip() for s in args.styles.split(",") if s.strip()]
 
+        # Parse passthrough styles
+        passthrough = None
+        if args.passthrough:
+            passthrough = [s.strip() for s in args.passthrough.split(",") if s.strip()]
+
         run_translate(
             path=args.p,
             lang=args.l,
@@ -147,6 +154,7 @@ def main():
             force_srt=(args.o == "srt"),
             show_name=args.show_name,
             keep_styles=styles,
+            passthrough_styles=passthrough,
         )
 
     elif args.command == "fix":

@@ -149,6 +149,7 @@ def run_translate(
     force_srt: bool = False,
     show_name: str = "",
     keep_styles: list | None = None,
+    passthrough_styles: list | None = None,
 ) -> None:
     """Run the full translation pipeline.
 
@@ -233,6 +234,8 @@ def run_translate(
 
     if keep_styles:
         log.info(f"Styles kept: {', '.join(keep_styles)}")
+    if passthrough_styles:
+        log.info(f"Passthrough styles: {', '.join(passthrough_styles)}")
 
     meta, payload, stats = build_blob(files, keep_styles=keep_styles)
     if stats["total"] == 0:
@@ -284,7 +287,7 @@ def run_translate(
     translated_blob = expand_translations(translated_unique, meta)
     completed, warnings = reassemble_files(
         translated_blob, meta, files, suffix=suffix, force_srt=force_srt,
-        kept_styles=keep_styles,
+        kept_styles=keep_styles, passthrough_styles=passthrough_styles,
     )
 
     # Report

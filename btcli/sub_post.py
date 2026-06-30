@@ -106,72 +106,82 @@ def _build_ass_style() -> pysubs2.SSAStyle:
 
 
 def build_ass_output(blocks: list, source_path: Path | None = None,
-                     kept_styles: list | None = None) -> str:
+                     kept_styles: list | None = None,
+                     passthrough_styles: list | None = None) -> str:
     """Build ASS file content from translated blocks.
 
     Copies header info (PlayRes, WrapStyle, etc.) and styles from source,
     swaps fonts: top style gets main font, others get secondary font.
     Strips all \\fn tags from dialogue.
-
-    Args:
-        blocks: list of {start, end, text, block_idx, style}
-        source_path: path to original ASS file (to copy header/styles from)
-        kept_styles: ordered list of kept style names (first = top/main)
-
-    Returns:
-        ASS file content as string
+    Passthrough styles are included untouched (original text, font, spacing, tags).
     """
     import re
-    fn_tag_re = re.compile(r'\\fn[^\\}]*')
+    fn_tag_re = re.compile(r'\\\\fn[^\\\\}]*')
 
     main_font = cfg.get("FONT_NAME", "Noto Sans Arabic")
     secondary_font = cfg.get("FONT_NAME_SECONDARY", "") or main_font
+    passthrough_styles = passthrough_styles or []
 
     if source_path and Path(source_path).exists():
-        # Load source to copy header and styles
         subs = pysubs2.SSAFile.load(str(source_path))
-        # Clear events — we'll add translated ones
+
+        # Collect passthrough events before clearing
+        passthrough_events = []
+        if passthrough_styles:
+            for event in subs:
+                if hasattr(event, "style") and event.style in passthrough_styles:
+                    passthrough_events.append(event)
+
         subs.events.clear()
 
-        # Swap fonts in kept styles and force spacing=0
+        all_kept = set(kept_styles or []) | set(passthrough_styles)
+
         if kept_styles:
             top_style = kept_styles[0]
             for style_name, style in subs.styles.items():
+                if style_name in passthrough_styles:
+                    continue
                 if style_name == top_style:
                     style.fontname = main_font
+                    style.spacing = 0
                 elif style_name in kept_styles:
                     style.fontname = secondary_font
-                # Force spacing to 0 for Arabic rendering
-                style.spacing = 0
+                    style.spacing = 0
 
-            # Remove styles not in kept list
-            to_remove = [s for s in subs.styles if s not in kept_styles]
+            to_remove = [s for s in subs.styles if s not in all_kept]
             for s in to_remove:
                 del subs.styles[s]
         else:
-            # No style filtering — just swap font on Default and force spacing=0
             for style_name, style in subs.styles.items():
+                if style_name in passthrough_styles:
+                    continue
                 style.spacing = 0
-            if "Default" in subs.styles:
-                subs.styles["Default"].fontname = main_font
+            if "Default" in subs.styles and "Default" not in passthrough_styles:
                 subs.styles["Default"].fontname = main_font
     else:
-        # No source — build from scratch
         subs = pysubs2.SSAFile()
         subs.styles["Default"] = _build_ass_style()
+        passthrough_events = []
 
-    # Add translated events, strip \fn tags
+    # Add translated events, strip \\fn tags
     for block in blocks:
         event = pysubs2.SSAEvent()
         event.start = block["start"]
         event.end = block["end"]
-        # Strip \fn tags
         text = fn_tag_re.sub("", block["text"])
         event.text = text
         event.style = block.get("style", "Default")
         subs.append(event)
 
+    # Add passthrough events untouched
+    for event in passthrough_events:
+        subs.append(event)
+
+    subs.sort()
+
     return subs.to_string("ass")
+
+
 
 
 def embed_font_in_ass(ass_content: str, font_path: str | None = None) -> str:
@@ -346,7 +356,8 @@ def build_srt_output(blocks: list) -> str:
 
 def reassemble_files(translated_blob: dict, meta: dict, files: list,
                      suffix: str = ".ar", force_srt: bool = False,
-                     kept_styles: list | None = None):
+                     kept_styles: list | None = None,
+                     passthrough_styles: list | None = None):
     """Write translated output files.
 
     Args:
@@ -403,7 +414,8 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
 
         # Write output
         if is_ass and not force_srt:
-            content = build_ass_output(blocks, source_path=fpath, kept_styles=kept_styles)
+            content = build_ass_output(blocks, source_path=fpath, kept_styles=kept_styles,
+                                       passthrough_styles=passthrough_styles)
             if embed_font:
                 content = embed_font_in_ass(content)
             out_path.write_text(content, encoding="utf-8")
