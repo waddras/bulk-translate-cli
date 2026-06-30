@@ -150,6 +150,7 @@ def run_translate(
     show_name: str = "",
     keep_styles: list | None = None,
     passthrough_styles: list | None = None,
+    auto_track: bool | None = None,
 ) -> None:
     """Run the full translation pipeline.
 
@@ -191,7 +192,20 @@ def run_translate(
             return
 
         log.info(f"Found {len(video_files)} video file(s)")
-        tracks = track_indices or [0]
+
+        # Auto track detection
+        if auto_track:
+            from .auto import auto_select_track_from_files
+            detected = auto_select_track_from_files(video_files)
+            if detected is not None:
+                track_indices = [detected]
+            else:
+                log.warning("Auto-detect failed, using track 0")
+                track_indices = track_indices or [0]
+        else:
+            track_indices = track_indices or [0]
+
+        tracks = track_indices
         log.info(f"Extracting track(s): {tracks}")
         log.sep()
 

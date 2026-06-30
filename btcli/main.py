@@ -71,6 +71,8 @@ def _parse_args():
                          help="Force output format: srt (force SRT from ASS source)")
     p_trans.add_argument("--show-name", default="", metavar="NAME",
                          help="Override auto-detected show name for translation prompt")
+    p_trans.add_argument("--auto", action="store_true",
+                         help="Auto-detect track and styles. Default styles: ALL,+karaoke")
 
     # ── fix ───────────────────────────────────────────────────────────────────
     p_fix = sub.add_parser("fix", help="Re-process translated files without API calls")
@@ -139,6 +141,15 @@ def main():
         if args.styles:
             from .styles import parse_styles_arg
             keep_styles, passthrough_styles = parse_styles_arg(args.styles)
+        elif args.auto:
+            # Auto mode default: ALL,+karaoke
+            from .styles import parse_styles_arg
+            keep_styles, passthrough_styles = parse_styles_arg("ALL,+karaoke")
+
+        # Auto track detection
+        auto_track = None
+        if args.auto and args.t == "0" and args.i == "vid":
+            auto_track = True
 
         run_translate(
             path=args.p,
@@ -151,6 +162,7 @@ def main():
             show_name=args.show_name,
             keep_styles=keep_styles,
             passthrough_styles=passthrough_styles,
+            auto_track=auto_track,
         )
 
     elif args.command == "fix":
