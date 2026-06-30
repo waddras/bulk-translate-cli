@@ -283,7 +283,8 @@ def run_translate(
     log.phase("PHASE 4 - Reassembling output files...")
     translated_blob = expand_translations(translated_unique, meta)
     completed, warnings = reassemble_files(
-        translated_blob, meta, files, suffix=suffix, force_srt=force_srt
+        translated_blob, meta, files, suffix=suffix, force_srt=force_srt,
+        kept_styles=keep_styles,
     )
 
     # Report

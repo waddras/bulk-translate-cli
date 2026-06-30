@@ -105,24 +105,65 @@ def _build_ass_style() -> pysubs2.SSAStyle:
     return style
 
 
-def build_ass_output(blocks: list) -> str:
+def build_ass_output(blocks: list, source_path: Path | None = None,
+                     kept_styles: list | None = None) -> str:
     """Build ASS file content from translated blocks.
 
+    Copies header info (PlayRes, WrapStyle, etc.) and styles from source,
+    swaps fonts: top style gets main font, others get secondary font.
+    Strips all \\fn tags from dialogue.
+
     Args:
-        blocks: list of {start, end, text, block_idx}
+        blocks: list of {start, end, text, block_idx, style}
+        source_path: path to original ASS file (to copy header/styles from)
+        kept_styles: ordered list of kept style names (first = top/main)
 
     Returns:
         ASS file content as string
     """
-    subs = pysubs2.SSAFile()
-    subs.styles["Default"] = _build_ass_style()
+    import re
+    fn_tag_re = re.compile(r'\\fn[^\\}]*')
 
+    main_font = cfg.get("FONT_NAME", "Noto Sans Arabic")
+    secondary_font = cfg.get("FONT_NAME_SECONDARY", "") or main_font
+
+    if source_path and Path(source_path).exists():
+        # Load source to copy header and styles
+        subs = pysubs2.SSAFile.load(str(source_path))
+        # Clear events — we'll add translated ones
+        subs.events.clear()
+
+        # Swap fonts in kept styles
+        if kept_styles:
+            top_style = kept_styles[0]
+            for style_name, style in subs.styles.items():
+                if style_name == top_style:
+                    style.fontname = main_font
+                elif style_name in kept_styles:
+                    style.fontname = secondary_font
+
+            # Remove styles not in kept list
+            to_remove = [s for s in subs.styles if s not in kept_styles]
+            for s in to_remove:
+                del subs.styles[s]
+        else:
+            # No style filtering — just swap font on Default
+            if "Default" in subs.styles:
+                subs.styles["Default"].fontname = main_font
+    else:
+        # No source — build from scratch
+        subs = pysubs2.SSAFile()
+        subs.styles["Default"] = _build_ass_style()
+
+    # Add translated events, strip \fn tags
     for block in blocks:
         event = pysubs2.SSAEvent()
         event.start = block["start"]
         event.end = block["end"]
-        event.text = block["text"]
-        event.style = "Default"
+        # Strip \fn tags
+        text = fn_tag_re.sub("", block["text"])
+        event.text = text
+        event.style = block.get("style", "Default")
         subs.append(event)
 
     return subs.to_string("ass")
@@ -299,7 +340,8 @@ def build_srt_output(blocks: list) -> str:
 # ── Main Reassembly ───────────────────────────────────────────────────────────
 
 def reassemble_files(translated_blob: dict, meta: dict, files: list,
-                     suffix: str = ".ar", force_srt: bool = False):
+                     suffix: str = ".ar", force_srt: bool = False,
+                     kept_styles: list | None = None):
     """Write translated output files.
 
     Args:
@@ -308,6 +350,7 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
         files: list of source file Paths
         suffix: output filename suffix
         force_srt: if True, always output SRT
+        kept_styles: ordered list of kept style names (for font assignment)
 
     Returns:
         (completed_names, warnings_list)
@@ -318,7 +361,7 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
         file_cues[m["file_idx"]].append((tag, m))
 
     completed, warnings = [], []
-    embed_font = cfg.get("EMBED_FONT", False)
+    embed_font = cfg.get("EMBED_FONT", True)
 
     for file_idx, cues in file_cues.items():
         fpath = Path(str(files[file_idx - 1]))
@@ -346,6 +389,7 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
                 "end": m["end"],
                 "text": text,
                 "block_idx": m["block_idx"],
+                "style": m.get("style", "Default"),
             })
 
         # Resolve output path
@@ -354,7 +398,7 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
 
         # Write output
         if is_ass and not force_srt:
-            content = build_ass_output(blocks)
+            content = build_ass_output(blocks, source_path=fpath, kept_styles=kept_styles)
             if embed_font:
                 content = embed_font_in_ass(content)
             out_path.write_text(content, encoding="utf-8")

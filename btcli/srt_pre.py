@@ -112,6 +112,7 @@ def parse_subtitle_file(path, keep_styles: list | None = None) -> list:
             "start": event.start,
             "end": event.end,
             "pos_tags": pos_tags,
+            "style": getattr(event, "style", "Default"),
         })
 
     return cues

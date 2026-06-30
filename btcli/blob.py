@@ -61,6 +61,7 @@ def build_blob(files: list, keep_styles: list | None = None):
                 "text": text,
                 "rep": rep,
                 "pos_tags": cue.get("pos_tags", ""),
+                "style": cue.get("style", "Default"),
             }
 
         log.item(f"[{file_id}] {fpath.name} → {len(cues)} cues")
