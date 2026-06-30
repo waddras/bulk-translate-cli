@@ -228,12 +228,21 @@ def run_translate(
     log.sep()
     log.phase("PHASE 1 - Building blob...")
 
+    # Resolve styles (handle ALL, +ALL, +karaoke)
+    if keep_styles is not None or passthrough_styles is not None:
+        from .styles import resolve_styles_with_files
+        from .srt_pre import get_styles_from_files
+        all_styles = get_styles_from_files([str(f) for f in files])
+        keep_styles, passthrough_styles = resolve_styles_with_files(
+            keep_styles, passthrough_styles, all_styles, [str(f) for f in files]
+        )
+
     # Auto-detect top styles if not specified by user
     if keep_styles is None:
         keep_styles = _auto_detect_styles(files)
 
     if keep_styles:
-        log.info(f"Styles kept: {', '.join(keep_styles)}")
+        log.info(f"Styles to translate: {', '.join(keep_styles)}")
     if passthrough_styles:
         log.info(f"Passthrough styles: {', '.join(passthrough_styles)}")
 

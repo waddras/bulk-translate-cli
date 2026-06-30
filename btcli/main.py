@@ -63,9 +63,8 @@ def _parse_args():
     p_trans.add_argument("-t", default="0", metavar="TRACKS",
                          help="Track number(s) to extract, comma-separated (only with -i vid). Default: 0")
     p_trans.add_argument("-s", "--styles", default=None, metavar="STYLES",
-                         help="Keep only these ASS styles (comma-separated names). Default: auto-pick top N by unique line count")
-    p_trans.add_argument("--passthrough", default=None, metavar="STYLES",
-                         help="Include these styles untranslated (comma-separated names). Kept as-is from source.")
+                         help="Style selection: names to translate, +name to passthrough, ALL, +ALL, +karaoke. "
+                              "E.g. 'Default,+Signs,+karaoke' or 'ALL,+karaoke' or 'Default,+ALL'")
     p_trans.add_argument("-suffix", default=None, metavar="SUFFIX",
                          help="Output filename suffix. Default: auto from target lang (e.g. .ar)")
     p_trans.add_argument("-o", default=None, choices=["srt"],
@@ -135,14 +134,11 @@ def main():
         track_indices = [int(t.strip()) for t in args.t.split(",") if t.strip()]
 
         # Parse styles
-        styles = None
+        keep_styles = None
+        passthrough_styles = None
         if args.styles:
-            styles = [s.strip() for s in args.styles.split(",") if s.strip()]
-
-        # Parse passthrough styles
-        passthrough = None
-        if args.passthrough:
-            passthrough = [s.strip() for s in args.passthrough.split(",") if s.strip()]
+            from .styles import parse_styles_arg
+            keep_styles, passthrough_styles = parse_styles_arg(args.styles)
 
         run_translate(
             path=args.p,
@@ -153,8 +149,8 @@ def main():
             suffix=args.suffix,
             force_srt=(args.o == "srt"),
             show_name=args.show_name,
-            keep_styles=styles,
-            passthrough_styles=passthrough,
+            keep_styles=keep_styles,
+            passthrough_styles=passthrough_styles,
         )
 
     elif args.command == "fix":
