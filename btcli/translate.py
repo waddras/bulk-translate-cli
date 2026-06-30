@@ -263,15 +263,17 @@ def run_translate(
         show_name = _detect_show_name(files)
     log.stat("Show name", show_name)
 
-    # Batch files
+    # Batch files — distribute evenly, max FILES_PER_BATCH per batch
     batch_size = cfg.get("FILES_PER_BATCH", 25)
     total_files = len(files)
 
     if total_files <= batch_size:
         batches = [files]
     else:
-        batches = [files[i:i + batch_size] for i in range(0, total_files, batch_size)]
-        log.info(f"Splitting into {len(batches)} batch(es) of ~{batch_size} files")
+        num_batches = (total_files + batch_size - 1) // batch_size
+        even_size = (total_files + num_batches - 1) // num_batches
+        batches = [files[i:i + even_size] for i in range(0, total_files, even_size)]
+        log.info(f"Splitting into {len(batches)} batch(es) of ~{even_size} files")
 
     # Process each batch
     all_completed = []
