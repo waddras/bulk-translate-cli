@@ -135,7 +135,6 @@ async def _call_gemini(client: httpx.AsyncClient, prompt: str, api_key: str,
     gen_cfg = _generation_config()
 
     try:
-        await _enforce_cooldown()
         response = await client.post(
             url,
             headers={"x-goog-api-key": api_key},
@@ -201,8 +200,14 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
         log.advance_progress()
         return None
 
-    # Send chunks in parallel batches
+    # Send chunks in parallel batches — cooldown between batches, not individual calls
     for batch_start in range(0, total, parallel):
+        # Cooldown before each batch (except first)
+        if batch_start > 0:
+            cooldown = cfg.get("PARALLEL_COOLDOWN", 60)
+            log.cooldown(cooldown)
+            await asyncio.sleep(cooldown)
+
         batch = chunks[batch_start:batch_start + parallel]
         tasks = [
             _translate_one(chunk, batch_start + i + 1)
@@ -313,6 +318,12 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
     retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
 
     for chunk_num, chunk in enumerate(chunks, 1):
+        # Cooldown between chunks (except first)
+        if chunk_num > 1:
+            cooldown = cfg.get("PARALLEL_COOLDOWN", 60)
+            log.cooldown(cooldown)
+            await asyncio.sleep(cooldown)
+
         est = estimate_output_tokens(chunk)
         model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
         log.chunk_status(chunk_num, len(chunks), len(chunk), est, f"{model} (full context)")

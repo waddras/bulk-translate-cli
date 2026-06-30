@@ -386,6 +386,8 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
             warnings.append(f"{fpath.name}: no cues found")
             continue
 
+        log.detail(f"  Writing: {fpath.name} ({len(cues)} cues)")
+
         cues.sort(key=lambda x: x[1]["block_idx"])
         untranslated = []
         blocks = []
@@ -417,6 +419,7 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
             content = build_ass_output(blocks, source_path=fpath, kept_styles=kept_styles,
                                        passthrough_styles=passthrough_styles)
             if embed_font:
+                log.detail(f"    Embedding font...")
                 content = embed_font_in_ass(content)
             out_path.write_text(content, encoding="utf-8")
         else:
