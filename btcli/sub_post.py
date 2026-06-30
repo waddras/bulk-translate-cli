@@ -10,7 +10,6 @@ Responsibilities:
 """
 from __future__ import annotations
 
-import base64
 import io
 from pathlib import Path
 
@@ -179,15 +178,14 @@ def embed_font_in_ass(ass_content: str, font_path: str | None = None) -> str:
         log.detail(f"    Warning: Font subsetting failed ({e}), embedding full font")
         font_data = Path(font_path).read_bytes()
 
-    # Encode to base64 in ASS format (76-char lines)
-    encoded = base64.b64encode(font_data).decode("ascii")
-    lines = [encoded[i:i+76] for i in range(0, len(encoded), 76)]
+    # Encode using ASS UUEncode format
+    encoded_lines = _ass_uuencode(font_data)
 
     font_name = Path(font_path).stem
     font_section = (
         "\n[Fonts]\n"
         f"fontname: {font_name}.ttf\n"
-        + "\n".join(lines)
+        + "\n".join(encoded_lines)
         + "\n"
     )
 
@@ -198,6 +196,46 @@ def embed_font_in_ass(ass_content: str, font_path: str | None = None) -> str:
         ass_content += "\n" + font_section
 
     return ass_content
+
+
+def _ass_uuencode(data: bytes) -> list:
+    """Encode binary data using ASS/SSA UUEncode format.
+
+    ASS uses a custom encoding: each group of 3 bytes becomes 4 characters.
+    Each byte is split into 6-bit values, then 33 (0x21, '!') is added to each.
+    Lines are 80 characters max.
+    """
+    result = []
+    line = ""
+
+    for i in range(0, len(data), 3):
+        chunk = data[i:i + 3]
+
+        # Pad to 3 bytes if needed
+        if len(chunk) == 1:
+            b0, b1, b2 = chunk[0], 0, 0
+        elif len(chunk) == 2:
+            b0, b1, b2 = chunk[0], chunk[1], 0
+        else:
+            b0, b1, b2 = chunk[0], chunk[1], chunk[2]
+
+        # Split 3 bytes (24 bits) into 4 x 6-bit values
+        c0 = b0 >> 2
+        c1 = ((b0 & 0x03) << 4) | (b1 >> 4)
+        c2 = ((b1 & 0x0F) << 2) | (b2 >> 6)
+        c3 = b2 & 0x3F
+
+        # Add 33 to each and convert to char
+        line += chr(c0 + 33) + chr(c1 + 33) + chr(c2 + 33) + chr(c3 + 33)
+
+        if len(line) >= 80:
+            result.append(line[:80])
+            line = line[80:]
+
+    if line:
+        result.append(line)
+
+    return result
 
 
 def _subset_font(font_path: str) -> bytes:
