@@ -327,7 +327,7 @@ def _translate_batch(
 
     max_blob = cfg.get("MAX_BLOB_LINES", 50000)
     if stats["total"] > max_blob:
-        log.error(f"Too many cues ({stats['total']} > {max_blob}). Batch too large.")
+        log.error(f"Too many cues ({stats['total']} > {max_blob}). Reduce FILES_PER_BATCH.")
         return [], [f"Batch exceeded MAX_BLOB_LINES ({stats['total']} > {max_blob})"]
 
     log.info(f"DEDUP: {stats['total']} total → {stats['unique']} unique "
