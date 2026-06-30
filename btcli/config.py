@@ -80,7 +80,7 @@ DEFAULT_SETTINGS = {
 
     # Tags
     "PRESERVE_TAGS": "pos, an, move, fad, fade;",
-    "STRIP_TAGS": "fn, fs, b, i, u, s;",
+    "STRIP_TAGS": "fn, fs, fsp, b, i, u, s;",
     "KEEP_TOP_STYLES": 2,
 
     # Discovery
