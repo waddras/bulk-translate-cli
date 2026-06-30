@@ -42,6 +42,7 @@ DEFAULT_SETTINGS = {
     # Translation
     "TRANSLATION_MODE": "chunked",
     "MAX_LINES_PER_CHUNK": 1000,
+    "FILES_PER_BATCH": 25,
     "PARALLEL_CHUNKS": 1,
     "PARALLEL_COOLDOWN": 60,
     "RETRY_ATTEMPTS": 5,

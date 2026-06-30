@@ -238,11 +238,10 @@ def run_translate(
         f = Path(f)
         log.item(f"[{i:02d}] {f.name}  ({f.stat().st_size / 1024:.1f} KB)")
 
-    # Phase 1: Build blob
+    # Resolve styles once (applies to all batches)
     log.sep()
-    log.phase("PHASE 1 - Building blob...")
+    log.phase("STYLE DETECTION")
 
-    # Resolve styles (handle ALL, +ALL, +karaoke)
     if keep_styles is not None or passthrough_styles is not None:
         from .styles import resolve_styles_with_files
         from .srt_pre import get_styles_from_files
@@ -251,7 +250,6 @@ def run_translate(
             keep_styles, passthrough_styles, all_styles, [str(f) for f in files]
         )
 
-    # Auto-detect top styles if not specified by user
     if keep_styles is None:
         keep_styles = _auto_detect_styles(files)
 
@@ -260,15 +258,77 @@ def run_translate(
     if passthrough_styles:
         log.info(f"Passthrough styles: {', '.join(passthrough_styles)}")
 
+    # Detect show name once
+    if not show_name:
+        show_name = _detect_show_name(files)
+    log.stat("Show name", show_name)
+
+    # Batch files
+    batch_size = cfg.get("FILES_PER_BATCH", 25)
+    total_files = len(files)
+
+    if total_files <= batch_size:
+        batches = [files]
+    else:
+        batches = [files[i:i + batch_size] for i in range(0, total_files, batch_size)]
+        log.info(f"Splitting into {len(batches)} batch(es) of ~{batch_size} files")
+
+    # Process each batch
+    all_completed = []
+    all_warnings = []
+
+    for batch_num, batch_files in enumerate(batches, 1):
+        if len(batches) > 1:
+            log.sep()
+            log.phase(f"BATCH {batch_num}/{len(batches)} — {len(batch_files)} file(s)")
+
+        batch_completed, batch_warnings = _translate_batch(
+            batch_files, keep_styles, passthrough_styles,
+            show_name, source_lang, target_lang,
+            api_key, suffix, force_srt,
+        )
+        all_completed.extend(batch_completed)
+        all_warnings.extend(batch_warnings)
+
+    # Final report
+    log.sep()
+    log.summary("Translation Complete", [
+        ("Files written", str(len(all_completed))),
+        ("Warnings", str(len(all_warnings)) if all_warnings else "0"),
+        ("Elapsed", log.elapsed()),
+    ])
+
+    for f in all_completed:
+        log.success(f"  done: {f}")
+    for w in all_warnings:
+        log.warning(w)
+
+
+def _translate_batch(
+    files: list,
+    keep_styles: list | None,
+    passthrough_styles: list | None,
+    show_name: str,
+    source_lang: str,
+    target_lang: str,
+    api_key: str,
+    suffix: str,
+    force_srt: bool,
+) -> tuple:
+    """Translate a single batch of files. Returns (completed, warnings)."""
+
+    # Phase 1: Build blob
+    log.sep()
+    log.phase("PHASE 1 - Building blob...")
     meta, payload, stats = build_blob(files, keep_styles=keep_styles)
     if stats["total"] == 0:
-        log.error("No dialogue cues found in selected files.")
-        return
+        log.warning("No dialogue cues found in this batch.")
+        return [], []
 
     max_blob = cfg.get("MAX_BLOB_LINES", 50000)
     if stats["total"] > max_blob:
-        log.error(f"Too many cues ({stats['total']} > {max_blob}). Select fewer files.")
-        return
+        log.error(f"Too many cues ({stats['total']} > {max_blob}). Batch too large.")
+        return [], [f"Batch exceeded MAX_BLOB_LINES ({stats['total']} > {max_blob})"]
 
     log.info(f"DEDUP: {stats['total']} total → {stats['unique']} unique "
              f"({stats['collapsed']} collapsed, ~{stats['pct']}% fewer tokens)")
@@ -284,11 +344,6 @@ def run_translate(
         total_tokens += est
         log.detail(f"  Chunk {i}: {len(ch)} lines, ~{est} output tokens")
     log.stat("Total estimated output tokens", str(total_tokens))
-
-    # Detect show name
-    if not show_name:
-        show_name = _detect_show_name(files)
-    log.stat("Show name", show_name)
 
     mode = cfg.get("TRANSLATION_MODE", "chunked")
     log.stat("Translation mode", mode)
@@ -313,20 +368,10 @@ def run_translate(
         kept_styles=keep_styles, passthrough_styles=passthrough_styles,
     )
 
-    # Report
-    log.sep()
+    # Batch report
     total_keys = len(set().union(*[set(ch.keys()) for ch in chunks]))
     translated_count = len(translated_unique)
     pct = round(translated_count / total_keys * 100) if total_keys else 0
+    log.info(f"  Batch: {translated_count}/{total_keys} unique lines ({pct}%)")
 
-    log.summary("Translation Complete", [
-        ("Files written", str(len(completed))),
-        ("Translated", f"{translated_count}/{total_keys} unique lines ({pct}%)"),
-        ("Warnings", str(len(warnings)) if warnings else "0"),
-        ("Elapsed", log.elapsed()),
-    ])
-
-    for f in completed:
-        log.success(f"  done: {f}")
-    for w in warnings:
-        log.warning(w)
+    return completed, warnings
