@@ -28,3 +28,6 @@ Thumbs.db
 *.ar.ass
 *.fr.srt
 *.fr.ass
+
+# User settings (use settings.default.conf as reference)
+settings.conf

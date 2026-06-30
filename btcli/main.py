@@ -81,6 +81,11 @@ def _parse_args():
     p_fix.add_argument("--backup", action="store_true",
                        help="Save .bak backup before overwriting")
 
+    # ── update ────────────────────────────────────────────────────────────────
+    p_update = sub.add_parser("update", help="Pull latest code + check/merge settings")
+    p_update.add_argument("--merge", action="store_true",
+                          help="Add new settings to user config with default values")
+
     return parser.parse_args()
 
 
@@ -106,6 +111,7 @@ def main():
         print("  btcli probe -p <path> [-i vid|sub] [-m sample|recursive] [-f filter] [-o outputs]")
         print("  btcli translate -p <path> [-l lang] [-i vid|sub] [-f filter] [-t tracks] [-suffix .ar] [-o srt]")
         print("  btcli fix -p <path> [-f filter] [--apply rtl,font,style,linebreak,all]")
+        print("  btcli update [--merge]")
         print("\nVerbosity:")
         print("  --quiet / -q     Minimal output (timestamps + summaries)")
         print("  --verbose / -v   Full output (debug details)")
@@ -153,6 +159,10 @@ def main():
             apply=args.apply,
             backup=args.backup,
         )
+
+    elif args.command == "update":
+        from .update import run_update
+        run_update(merge=args.merge)
 
     log.close()
 

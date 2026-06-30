@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 
 # ── Search paths ──────────────────────────────────────────────────────────────
-_INSTALL_DIR = Path("/opt/bulk-translate-cli")
+_INSTALL_DIR = Path("/opt/btcli")
 
 _SEARCH_PATHS = [
     Path.cwd() / "settings.conf",
@@ -22,6 +22,9 @@ _SEARCH_PATHS = [
     Path.home() / ".config" / "btcli" / "settings.conf",
     Path("/etc/btcli/settings.conf"),
 ]
+
+# Default settings file (shipped with repo, updated via git pull)
+_DEFAULT_SETTINGS_FILE = _INSTALL_DIR / "settings.default.conf"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_SETTINGS = {
@@ -120,20 +123,37 @@ def _find_settings_file() -> Path | None:
 
 
 def load_settings() -> dict:
-    """Load settings.conf merged over defaults."""
+    """Load settings: hardcoded defaults → settings.default.conf → user settings.conf."""
     global _settings_file
     merged = json.loads(json.dumps(DEFAULT_SETTINGS))  # deep copy
+
+    # Layer 1: Load settings.default.conf (repo-shipped defaults)
+    if _DEFAULT_SETTINGS_FILE.exists():
+        try:
+            with open(_DEFAULT_SETTINGS_FILE) as f:
+                raw = f.read()
+            import re
+            cleaned = re.sub(r'(?m)^\s*//.*$', '', raw)
+            cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
+            defaults_from_file = json.loads(cleaned)
+            for k, v in defaults_from_file.items():
+                if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                    merged[k].update(v)
+                else:
+                    merged[k] = v
+        except Exception as e:
+            print(f"[config] Warning: failed to load {_DEFAULT_SETTINGS_FILE}: {e}")
+
+    # Layer 2: Load user settings.conf (overrides)
     _settings_file = _find_settings_file()
     if _settings_file:
         try:
             with open(_settings_file) as f:
                 raw = f.read()
-            # Strip // comments (not inside strings)
             import re
             cleaned = re.sub(r'(?m)^\s*//.*$', '', raw)
-            cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)  # trailing commas
+            cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
             user = json.loads(cleaned)
-            # Deep merge for dicts (like LANGUAGE_CODES)
             for k, v in user.items():
                 if isinstance(v, dict) and isinstance(merged.get(k), dict):
                     merged[k].update(v)
@@ -141,6 +161,7 @@ def load_settings() -> dict:
                     merged[k] = v
         except Exception as e:
             print(f"[config] Warning: failed to load {_settings_file}: {e}")
+
     # Env var override for API key
     env_key = os.environ.get("GEMINI_API_KEY", "")
     if env_key:
@@ -157,7 +178,6 @@ def load_settings() -> dict:
                         merged["GEMINI_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
                         break
                     elif line and not line.startswith("#"):
-                        # Bare key (no prefix)
                         merged["GEMINI_API_KEY"] = line
                         break
             except Exception:
