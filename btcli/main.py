@@ -71,6 +71,16 @@ def _parse_args():
     p_trans.add_argument("--show-name", default="", metavar="NAME",
                          help="Override auto-detected show name for translation prompt")
 
+    # ── fix ───────────────────────────────────────────────────────────────────
+    p_fix = sub.add_parser("fix", help="Re-process translated files without API calls")
+    p_fix.add_argument("-p", required=True, help="Path (file or directory)")
+    p_fix.add_argument("-f", default=".ar.", metavar="FILTER",
+                       help="Filter by filename pattern. Default: .ar.")
+    p_fix.add_argument("--apply", default="all", metavar="FIXES",
+                       help="Fixes to apply (comma-separated): rtl, font, style, linebreak, all. Default: all")
+    p_fix.add_argument("--backup", action="store_true",
+                       help="Save .bak backup before overwriting")
+
     return parser.parse_args()
 
 
@@ -95,6 +105,7 @@ def main():
         print("\nCommands:")
         print("  btcli probe -p <path> [-i vid|sub] [-m sample|recursive] [-f filter] [-o outputs]")
         print("  btcli translate -p <path> [-l lang] [-i vid|sub] [-f filter] [-t tracks] [-suffix .ar] [-o srt]")
+        print("  btcli fix -p <path> [-f filter] [--apply rtl,font,style,linebreak,all]")
         print("\nVerbosity:")
         print("  --quiet / -q     Minimal output (timestamps + summaries)")
         print("  --verbose / -v   Full output (debug details)")
@@ -132,6 +143,15 @@ def main():
             force_srt=(args.o == "srt"),
             show_name=args.show_name,
             keep_styles=styles,
+        )
+
+    elif args.command == "fix":
+        from .fix import run_fix
+        run_fix(
+            path=args.p,
+            filter_pattern=args.f,
+            apply=args.apply,
+            backup=args.backup,
         )
 
     log.close()

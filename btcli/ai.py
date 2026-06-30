@@ -178,31 +178,43 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
     parallel = max(1, cfg.get("PARALLEL_CHUNKS", 1))
     total = len(chunks)
 
+    async def _translate_one(chunk, chunk_num):
+        """Translate a single chunk with retries."""
+        est = estimate_output_tokens(chunk)
+        model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
+        log.chunk_status(chunk_num, total, len(chunk), est, model)
+
+        prompt = _build_prompt(chunk, show_name, source_lang, target_lang)
+
+        for attempt in range(1, retry_attempts + 1):
+            result = await _call_gemini(client, prompt, api_key, attempt=attempt)
+            if result:
+                log.chunk_success(chunk_num, len(result))
+                log.advance_progress()
+                return result
+            else:
+                log.attempt(attempt, retry_attempts, "failed")
+                if attempt < retry_attempts:
+                    await asyncio.sleep(retry_cooldown * attempt)
+
+        log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
+        log.advance_progress()
+        return None
+
+    # Send chunks in parallel batches
     for batch_start in range(0, total, parallel):
         batch = chunks[batch_start:batch_start + parallel]
+        tasks = [
+            _translate_one(chunk, batch_start + i + 1)
+            for i, chunk in enumerate(batch)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for i, chunk in enumerate(batch):
-            chunk_num = batch_start + i + 1
-            est = estimate_output_tokens(chunk)
-            model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
-            log.chunk_status(chunk_num, total, len(chunk), est, model)
-
-            prompt = _build_prompt(chunk, show_name, source_lang, target_lang)
-
-            for attempt in range(1, retry_attempts + 1):
-                result = await _call_gemini(client, prompt, api_key, attempt=attempt)
-                if result:
-                    log.chunk_success(chunk_num, len(result))
-                    translated.update(result)
-                    log.advance_progress()
-                    break
-                else:
-                    log.attempt(attempt, retry_attempts, "failed")
-                    if attempt < retry_attempts:
-                        await asyncio.sleep(retry_cooldown * attempt)
-            else:
-                log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
-                log.advance_progress()
+        for result in results:
+            if isinstance(result, Exception):
+                log.detail(f"    Batch error: {result}")
+            elif result:
+                translated.update(result)
 
     return translated
 
