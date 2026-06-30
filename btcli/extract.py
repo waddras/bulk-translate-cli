@@ -76,6 +76,11 @@ def extract_track(filepath: str, track_index: int, output_path: str | None = Non
 
     if output_path:
         out_path = Path(output_path)
+        # Correct extension if it doesn't match the codec
+        if ext == "srt" and out_path.suffix.lower() == ".ass":
+            out_path = out_path.with_suffix(".srt")
+        elif ext == "ass" and out_path.suffix.lower() == ".srt":
+            out_path = out_path.with_suffix(".ass")
     else:
         out_path = fpath.with_suffix(f".track{track_index}.{ext}")
 
@@ -264,8 +269,18 @@ def extract_from_videos(video_files: list, track_indices: list,
         # Validate tracks — skip bitmap, auto-select text
         valid_tracks = validate_track_indices(str(fpath), track_indices)
 
-        # Build output path
-        ext = "srt" if force_srt else "ass"
+        # Build output path — detect correct extension from codec
+        try:
+            tracks = probe_tracks(str(fpath))
+            track_codec = tracks[valid_tracks[0]]["codec"] if valid_tracks[0] < len(tracks) else "ass"
+        except Exception:
+            track_codec = "ass"
+
+        if force_srt or track_codec in ("subrip", "srt"):
+            ext = "srt"
+        else:
+            ext = "ass"
+
         out_name = fpath.stem + suffix + "." + ext
         out_path = str(fpath.parent / out_name)
 
