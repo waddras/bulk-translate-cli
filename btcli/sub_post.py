@@ -357,7 +357,8 @@ def build_srt_output(blocks: list) -> str:
 def reassemble_files(translated_blob: dict, meta: dict, files: list,
                      suffix: str = ".ar", force_srt: bool = False,
                      kept_styles: list | None = None,
-                     passthrough_styles: list | None = None):
+                     passthrough_styles: list | None = None,
+                     only_file_indices: set | list | None = None):
     """Write translated output files.
 
     Args:
@@ -367,6 +368,7 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
         suffix: output filename suffix
         force_srt: if True, always output SRT
         kept_styles: ordered list of kept style names (for font assignment)
+        only_file_indices: optional 1-based file indices to write
 
     Returns:
         (completed_names, warnings_list)
@@ -378,8 +380,11 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
 
     completed, warnings = [], []
     embed_font = cfg.get("EMBED_FONT", True)
+    selected_indices = set(only_file_indices) if only_file_indices is not None else None
 
     for file_idx, cues in file_cues.items():
+        if selected_indices is not None and file_idx not in selected_indices:
+            continue
         fpath = Path(str(files[file_idx - 1]))
         if not cues:
             log.detail(f"  No cues for {fpath.name} - skipping")

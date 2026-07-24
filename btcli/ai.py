@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 
 import httpx
@@ -24,6 +25,145 @@ from .logger import log
 # ── Constants ─────────────────────────────────────────────────────────────────
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 _last_api_call = 0.0
+LINE_BREAK_SENTINEL = "<BTCLI_LB>"
+INLINE_ID_RE = re.compile(r"^\s*<BTCLI_ID:([^>]+)>\s*")
+
+
+def _wire_text(tag: str, text: str) -> str:
+    """Attach an inline ID and protect source line breaks for the model."""
+    protected = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", LINE_BREAK_SENTINEL)
+    return f"<BTCLI_ID:{tag}> {protected}"
+
+
+def _wire_payload(payload: dict) -> dict:
+    return {
+        tag: {"id": tag, "text": _wire_text(tag, text)}
+        for tag, text in payload.items()
+    }
+
+
+def _output_contract(target_lang: str) -> str:
+    return (
+        "BTCLI OUTPUT CONTRACT (this overrides any earlier output-format wording):\n"
+        "- Every JSON key maps to an object with exactly two fields: id and text.\n"
+        "- Copy the outer JSON key into id, and keep the same <BTCLI_ID:...> token at the start of text.\n"
+        "- The outer key, id field, and inline BTCLI_ID token MUST all identify the same source line.\n"
+        f"- Translate only the text after the inline ID to {target_lang}.\n"
+        f"- Preserve every {LINE_BREAK_SENTINEL} token exactly; never remove, translate, or move it.\n"
+        "- Never merge, split, skip, renumber, or reorder source items.\n"
+        "- Return JSON only, with no markdown or explanation.\n"
+    )
+
+
+def _rebalance_line_breaks(text: str, source: str) -> str:
+    """Restore the source line count if the model dropped protected breaks."""
+    expected_lines = source.split("\n")
+    line_count = len(expected_lines)
+    flat = " ".join(text.replace(LINE_BREAK_SENTINEL, " ").replace(r"\N", " ").split())
+    if line_count <= 1 or not flat:
+        return flat
+
+    # Dual-speaker cues are best split at their dialogue markers.
+    if all(re.match(r"^\s*(?:--|[-–—])", line) for line in expected_lines):
+        parts = re.split(r"\s+(?=(?:--|[-–—])\s*)", flat)
+        if len(parts) == line_count:
+            return "\n".join(part.strip() for part in parts)
+
+    # Cosmetic wrapping: preserve the number of source lines, but rebalance at
+    # target-language word boundaries according to source line proportions.
+    words = flat.split()
+    if len(words) >= line_count:
+        weights = [max(1, len(line)) for line in expected_lines]
+        total_weight = sum(weights)
+        cuts = []
+        cumulative = 0
+        previous = 0
+        for weight in weights[:-1]:
+            cumulative += weight
+            cut = round(len(words) * cumulative / total_weight)
+            cut = max(previous + 1, min(cut, len(words) - (line_count - len(cuts) - 1)))
+            cuts.append(cut)
+            previous = cut
+        result = []
+        start = 0
+        for cut in cuts + [len(words)]:
+            result.append(" ".join(words[start:cut]))
+            start = cut
+        return "\n".join(result)
+
+    # Very short translations: character-level fallback.
+    size = max(1, len(flat) // line_count)
+    parts = [flat[i * size:(i + 1) * size].strip() for i in range(line_count - 1)]
+    parts.append(flat[(line_count - 1) * size:].strip())
+    return "\n".join(parts)
+
+
+def _restore_line_breaks(text: str, source: str) -> str:
+    restored = text.replace(LINE_BREAK_SENTINEL, "\n").replace(r"\N", "\n")
+    expected = source.count("\n")
+    if restored.count("\n") == expected:
+        return restored
+    log.detail("    Model changed a line-break marker; restored source line count locally")
+    return _rebalance_line_breaks(restored, source)
+
+
+def _normalize_result(result, expected: dict) -> dict:
+    """Validate outer keys against duplicated inline IDs and return safe mappings."""
+    if not isinstance(result, dict):
+        log.detail("    Invalid model response: JSON root is not an object")
+        return {}
+
+    normalized = {}
+    seen_ids = set()
+    invalid_ids = set()
+    for outer_key, value in result.items():
+        outer_key = str(outer_key)
+        if not isinstance(value, dict):
+            log.detail(f"    Rejecting {outer_key}: value does not contain id/text fields")
+            continue
+        inner_id = str(value.get("id", ""))
+        text = value.get("text")
+        if not isinstance(text, str):
+            log.detail(f"    Rejecting {outer_key}: translated text is not a string")
+            continue
+        match = INLINE_ID_RE.match(text)
+        inline_id = match.group(1) if match else ""
+        if not inner_id or not inline_id or inner_id != inline_id:
+            log.detail(f"    Rejecting {outer_key}: inner and inline IDs do not match")
+            continue
+        if inner_id not in expected:
+            log.detail(f"    Ignoring unexpected inline ID: {inner_id}")
+            continue
+        if inner_id in seen_ids:
+            log.detail(f"    Rejecting duplicate inline ID: {inner_id}")
+            invalid_ids.add(inner_id)
+            normalized.pop(inner_id, None)
+            continue
+        seen_ids.add(inner_id)
+        if outer_key != inner_id:
+            log.detail(
+                f"    Rejecting {outer_key}: outer key does not match inline ID {inner_id}"
+            )
+            invalid_ids.add(inner_id)
+            continue
+        translated_text = INLINE_ID_RE.sub("", text, count=1)
+        normalized[inner_id] = _restore_line_breaks(translated_text, expected[inner_id])
+
+    for invalid_id in invalid_ids:
+        normalized.pop(invalid_id, None)
+
+    missing = set(expected) - set(normalized)
+    if missing:
+        log.detail(f"    ID validation left {len(missing)} key(s) for targeted retry")
+    return normalized
+
+
+def _notify_progress(callback, translated: dict) -> None:
+    if callback:
+        try:
+            callback(translated)
+        except Exception as exc:
+            log.detail(f"    Output progress callback failed: {exc}")
 
 
 # ── Cooldown ──────────────────────────────────────────────────────────────────
@@ -45,24 +185,24 @@ async def _enforce_cooldown():
 
 def _build_prompt(chunk: dict, show_name: str = "",
                   source_lang: str = "english", target_lang: str = "arabic") -> str:
-    """Build translation prompt from template."""
+    """Build translation prompt with duplicated JSON and inline IDs."""
     template = cfg.get("PROMPT_TEMPLATE", "")
+    wire_json = json.dumps(_wire_payload(chunk), ensure_ascii=False)
     if template and "{json_blob}" in template:
         name = show_name or "Unknown"
-        return (
+        base = (
             template
             .replace("{show_name}", name)
             .replace("{source_language}", source_lang)
             .replace("{target_language}", target_lang)
-            .replace("{json_blob}", json.dumps(chunk, ensure_ascii=False))
+            .replace("{json_blob}", "")
         )
-    return (
-        f"You are a professional {source_lang} to {target_lang} subtitle translator.\n"
-        f"Translate each value in the following JSON object to {target_lang}.\n"
-        f"Return a valid JSON object with the EXACT same keys and ONLY {target_lang} values.\n"
-        f"No extra keys or explanation.\n\n"
-        + json.dumps(chunk, ensure_ascii=False)
-    )
+    else:
+        base = (
+            f"You are a professional {source_lang} to {target_lang} subtitle translator.\n"
+            f"Translate every source item to {target_lang}.\n"
+        )
+    return f"{base.rstrip()}\n\n{_output_contract(target_lang)}\nPayload:\n{wire_json}"
 
 
 def _build_full_context_prompt(translate_keys: list, full_blob: dict,
@@ -74,10 +214,10 @@ def _build_full_context_prompt(translate_keys: list, full_blob: dict,
         f"Context: Subtitles from \"{show_name or 'Unknown'}\".\n\n"
         f"Below is the FULL dialogue. Translate ONLY the keys listed below.\n"
         f"Keys to translate: {json.dumps(translate_keys)}\n\n"
-        f"Return a valid JSON object with ONLY those keys and their {target_lang} translations.\n"
-        f"Do NOT translate or include any other keys.\n\n"
+        f"{_output_contract(target_lang)}\n"
+        f"Return ONLY the requested keys.\n\n"
         f"Full dialogue:\n"
-        f"{json.dumps(full_blob, ensure_ascii=False)}"
+        f"{json.dumps(_wire_payload(full_blob), ensure_ascii=False)}"
     )
 
 
@@ -90,10 +230,10 @@ def _build_retry_prompt(translate_keys: list, context: dict,
         f"Context: Subtitles from \"{show_name or 'Unknown'}\".\n\n"
         f"Below is a section of dialogue. Translate ONLY the keys listed below.\n"
         f"Keys to translate: {json.dumps(translate_keys)}\n\n"
-        f"Return a valid JSON object with ONLY those keys and their {target_lang} translations.\n"
-        f"Do NOT translate or include any other keys.\n\n"
+        f"{_output_contract(target_lang)}\n"
+        f"Return ONLY the requested keys.\n\n"
         f"Dialogue section:\n"
-        f"{json.dumps(context, ensure_ascii=False)}"
+        f"{json.dumps(_wire_payload(context), ensure_ascii=False)}"
     )
 
 
@@ -167,7 +307,7 @@ async def _call_gemini(client: httpx.AsyncClient, prompt: str, api_key: str,
 
 async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: str,
                             show_name: str = "", source_lang: str = "english",
-                            target_lang: str = "arabic") -> dict:
+                            target_lang: str = "arabic", progress_callback=None) -> dict:
     """Translate using chunked mode: independent chunks with retry."""
     from .blob import estimate_output_tokens
 
@@ -188,13 +328,18 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
         for attempt in range(1, retry_attempts + 1):
             result = await _call_gemini(client, prompt, api_key, attempt=attempt)
             if result:
-                log.chunk_success(chunk_num, len(result))
-                log.advance_progress()
-                return result
+                normalized = _normalize_result(result, chunk)
+                if normalized:
+                    translated.update(normalized)
+                    _notify_progress(progress_callback, translated)
+                    log.chunk_success(chunk_num, len(normalized))
+                    log.advance_progress()
+                    return normalized
+                log.attempt(attempt, retry_attempts, "response failed ID validation")
             else:
                 log.attempt(attempt, retry_attempts, "failed")
-                if attempt < retry_attempts:
-                    await asyncio.sleep(retry_cooldown * attempt)
+            if attempt < retry_attempts:
+                await asyncio.sleep(retry_cooldown * attempt)
 
         log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
         log.advance_progress()
@@ -230,7 +375,7 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
 async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                                full_payload: dict, api_key: str,
                                show_name: str = "", source_lang: str = "english",
-                               target_lang: str = "arabic") -> dict:
+                               target_lang: str = "arabic", progress_callback=None) -> dict:
     """Translate using multi_turn mode: full blob as context, chunks as turns."""
     from .blob import estimate_output_tokens
     import json_repair
@@ -245,11 +390,9 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
         f"You are a professional {source_lang} to {target_lang} subtitle translator.\n"
         f"Context: Subtitles from \"{show_name or 'Unknown'}\".\n\n"
         f"Here is the full dialogue for reference:\n"
-        f"{json.dumps(full_payload, ensure_ascii=False)}\n\n"
-        f"I will send you subsets of keys to translate. For each subset:\n"
-        f"- Return a valid JSON object with ONLY those keys and their {target_lang} translations\n"
-        f"- Use the full context above for consistent tone and references\n"
-        f"- No extra keys, no explanation, no markdown"
+        f"{json.dumps(_wire_payload(full_payload), ensure_ascii=False)}\n\n"
+        f"I will send you subsets of keys to translate.\n"
+        f"{_output_contract(target_lang)}"
     )
 
     contents = [{"role": "user", "parts": [{"text": context_text}]}]
@@ -263,7 +406,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
             f"Translate these keys:\n"
             f"{json.dumps(keys_to_translate)}\n\n"
             f"Values:\n"
-            f"{json.dumps(chunk, ensure_ascii=False)}"
+            f"{json.dumps(_wire_payload(chunk), ensure_ascii=False)}"
         )
 
         current_contents = contents + [{"role": "user", "parts": [{"text": turn_text}]}]
@@ -286,8 +429,12 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                 response.raise_for_status()
                 raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
                 result = json_repair.loads(raw)
-                log.chunk_success(chunk_num, len(result))
-                translated.update(result)
+                normalized = _normalize_result(result, chunk)
+                if not normalized:
+                    raise ValueError("response failed ID validation")
+                log.chunk_success(chunk_num, len(normalized))
+                translated.update(normalized)
+                _notify_progress(progress_callback, translated)
                 contents.append({"role": "user", "parts": [{"text": turn_text}]})
                 contents.append({"role": "model", "parts": [{"text": raw}]})
                 log.advance_progress()
@@ -309,7 +456,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
 async def translate_full_context(client: httpx.AsyncClient, chunks: list,
                                  full_payload: dict, api_key: str,
                                  show_name: str = "", source_lang: str = "english",
-                                 target_lang: str = "arabic") -> dict:
+                                 target_lang: str = "arabic", progress_callback=None) -> dict:
     """Translate using full_context mode: full blob sent every request."""
     from .blob import estimate_output_tokens
 
@@ -334,11 +481,17 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
         for attempt in range(1, retry_attempts + 1):
             result = await _call_gemini(client, prompt, api_key, attempt=attempt)
             if result:
-                filtered = {k: v for k, v in result.items() if k in keys}
-                log.chunk_success(chunk_num, len(filtered))
-                translated.update(filtered)
-                log.advance_progress()
-                break
+                expected = {key: full_payload[key] for key in keys}
+                normalized = _normalize_result(result, expected)
+                if normalized:
+                    log.chunk_success(chunk_num, len(normalized))
+                    translated.update(normalized)
+                    _notify_progress(progress_callback, translated)
+                    log.advance_progress()
+                    break
+                log.attempt(attempt, retry_attempts, "response failed ID validation")
+                if attempt < retry_attempts:
+                    await asyncio.sleep(retry_cooldown * attempt)
             else:
                 log.attempt(attempt, retry_attempts, "failed")
                 if attempt < retry_attempts:
@@ -395,7 +548,8 @@ def build_retry_batches(missing_keys: set, full_payload: dict, context_lines: in
 
 async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
                         full_payload: dict, api_key: str, show_name: str = "",
-                        source_lang: str = "english", target_lang: str = "arabic") -> dict:
+                        source_lang: str = "english", target_lang: str = "arabic",
+                        recovered_callback=None) -> dict:
     """Retry translation of missing keys with context + model cycling."""
     recovered = {}
     max_retries = cfg.get("MAX_FAILED_CHUNKS", 5)
@@ -424,15 +578,20 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
             for attempt in range(1, retry_attempts + 1):
                 result = await _call_gemini(client, prompt, api_key, model=model, attempt=attempt)
                 if result:
-                    filtered = {k: v for k, v in result.items() if k in batch["translate_keys"]}
-                    log.info(f"    Recovered {len(filtered)}/{len(batch['translate_keys'])} keys")
-                    recovered.update(filtered)
-                    remaining -= set(filtered.keys())
-                    break
+                    expected = {key: full_payload[key] for key in batch["translate_keys"]}
+                    normalized = _normalize_result(result, expected)
+                    log.info(f"    Recovered {len(normalized)}/{len(batch['translate_keys'])} keys")
+                    if normalized:
+                        recovered.update(normalized)
+                        remaining -= set(normalized.keys())
+                        if recovered_callback:
+                            recovered_callback(normalized)
+                        break
+                    log.attempt(attempt, retry_attempts, "response failed ID validation")
                 else:
                     log.attempt(attempt, retry_attempts, "retry failed")
-                    if attempt < retry_attempts:
-                        await asyncio.sleep(retry_cooldown)
+                if attempt < retry_attempts:
+                    await asyncio.sleep(retry_cooldown)
 
         if not remaining:
             log.success(f"  All lines recovered after {retry_round} retry round(s)!")
@@ -449,7 +608,7 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
 
 async def run_translation(chunks: list, payload: dict, api_key: str,
                           show_name: str = "", source_lang: str = "english",
-                          target_lang: str = "arabic") -> dict:
+                          target_lang: str = "arabic", progress_callback=None) -> dict:
     """Run async translation using the configured mode, then retry missing."""
     mode = cfg.get("TRANSLATION_MODE", "chunked")
     translated = {}
@@ -457,15 +616,18 @@ async def run_translation(chunks: list, payload: dict, api_key: str,
     async with httpx.AsyncClient() as client:
         if mode == "multi_turn":
             translated = await translate_multi_turn(
-                client, chunks, payload, api_key, show_name, source_lang, target_lang
+                client, chunks, payload, api_key, show_name, source_lang, target_lang,
+                progress_callback=progress_callback,
             )
         elif mode == "full_context":
             translated = await translate_full_context(
-                client, chunks, payload, api_key, show_name, source_lang, target_lang
+                client, chunks, payload, api_key, show_name, source_lang, target_lang,
+                progress_callback=progress_callback,
             )
         else:
             translated = await translate_chunked(
-                client, chunks, api_key, show_name, source_lang, target_lang
+                client, chunks, api_key, show_name, source_lang, target_lang,
+                progress_callback=progress_callback,
             )
 
         # Retry missing
@@ -475,8 +637,13 @@ async def run_translation(chunks: list, payload: dict, api_key: str,
         missing = all_keys - set(translated.keys())
 
         if missing:
+            def _recovered_progress(partial):
+                translated.update(partial)
+                _notify_progress(progress_callback, translated)
+
             recovered = await retry_missing(
-                client, missing, payload, api_key, show_name, source_lang, target_lang
+                client, missing, payload, api_key, show_name, source_lang, target_lang,
+                recovered_callback=_recovered_progress,
             )
             translated.update(recovered)
 

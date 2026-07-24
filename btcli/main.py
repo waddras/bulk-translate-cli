@@ -73,6 +73,10 @@ def _parse_args():
                          help="Override auto-detected show name for translation prompt")
     p_trans.add_argument("--auto", action="store_true",
                          help="Auto-detect track and styles. Default styles: ALL,+karaoke")
+    p_trans.add_argument("--force", action="store_true",
+                         help="Force subtitle re-extraction instead of reusing a manifest record")
+    p_trans.add_argument("--files-per-call", "-fpc", type=int, default=None, metavar="N",
+                         help="Translate N whole subtitle files per API call; bypasses MAX_LINES_PER_CHUNK")
 
     # ── fix ───────────────────────────────────────────────────────────────────
     p_fix = sub.add_parser("fix", help="Re-process translated files without API calls")
@@ -163,6 +167,8 @@ def main():
             keep_styles=keep_styles,
             passthrough_styles=passthrough_styles,
             auto_track=auto_track,
+            force=args.force,
+            files_per_call=args.files_per_call,
         )
 
     elif args.command == "fix":

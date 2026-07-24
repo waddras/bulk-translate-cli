@@ -31,3 +31,7 @@ Thumbs.db
 
 # User settings (use settings.default.conf as reference)
 settings.conf
+
+# Per-directory runtime job records
+.btcli.json
+.btcli.json.tmp

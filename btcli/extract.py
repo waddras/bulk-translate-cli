@@ -248,14 +248,23 @@ def validate_track_indices(filepath: str, track_indices: list) -> list:
 # ── Batch Extraction (for translate flow) ─────────────────────────────────────
 
 def extract_from_videos(video_files: list, track_indices: list,
-                        suffix: str = "", force_srt: bool = False) -> list:
+                        suffix: str = "", force_srt: bool = False,
+                        force: bool = False, reuse_lookup=None,
+                        extraction_callback=None) -> list:
     """Extract subtitle tracks from multiple video files.
+
+    A recorded extraction may be reused through ``reuse_lookup``. Reuse is
+    deliberately gated by the manifest callback rather than filename alone.
 
     Args:
         video_files: list of video file paths
         track_indices: track index(es) to extract (combined if multiple)
         suffix: output filename suffix (e.g. ".en")
         force_srt: convert to SRT
+        force: bypass recorded extraction reuse
+        reuse_lookup: callable(video_path, validated_tracks, suffix, extension)
+            -> existing path or None
+        extraction_callback: callable with extraction details for manifest logging
 
     Returns:
         List of paths to extracted subtitle files.
@@ -281,6 +290,16 @@ def extract_from_videos(video_files: list, track_indices: list,
         else:
             ext = "ass"
 
+        if not force and reuse_lookup:
+            reusable = reuse_lookup(fpath, valid_tracks, suffix, ext)
+            if reusable:
+                reusable = Path(reusable)
+                extracted.append(str(reusable))
+                log.info(f"        Reusing extracted subtitle: {reusable.name}")
+                if extraction_callback:
+                    extraction_callback(fpath, valid_tracks, reusable, track_codec, True)
+                continue
+
         out_name = fpath.stem + suffix + "." + ext
         out_path = str(fpath.parent / out_name)
 
@@ -291,6 +310,8 @@ def extract_from_videos(video_files: list, track_indices: list,
                 result = extract_track(str(fpath), valid_tracks[0], out_path, force_srt)
             extracted.append(result)
             log.detail(f"        → {Path(result).name}")
+            if extraction_callback:
+                extraction_callback(fpath, valid_tracks, Path(result), track_codec, False)
         except Exception as e:
             log.detail(f"        ERROR: {e}")
 

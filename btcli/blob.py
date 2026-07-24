@@ -122,3 +122,30 @@ def estimate_output_tokens(chunk: dict) -> int:
     """
     total_chars = sum(len(v) for v in chunk.values())
     return int(total_chars / 3 * 1.5)
+
+
+
+def split_blob_by_files(payload: dict, meta: dict, files_per_call: int) -> list:
+    """Split unique payload by whole source-file groups.
+
+    Unlike :func:`split_blob`, this deliberately ignores MAX_LINES_PER_CHUNK.
+    Each representative key belongs to the source file where that unique text
+    first appeared; consecutive groups of ``files_per_call`` files form calls.
+    """
+    files_per_call = max(1, int(files_per_call))
+    rep_file = {}
+    max_file_idx = 0
+    for item in meta.values():
+        max_file_idx = max(max_file_idx, item["file_idx"])
+        rep_file.setdefault(item["rep"], item["file_idx"])
+
+    chunks = []
+    for first_idx in range(1, max_file_idx + 1, files_per_call):
+        last_idx = first_idx + files_per_call - 1
+        chunk = {
+            key: text for key, text in payload.items()
+            if first_idx <= rep_file.get(key, 0) <= last_idx
+        }
+        if chunk:
+            chunks.append(chunk)
+    return chunks
