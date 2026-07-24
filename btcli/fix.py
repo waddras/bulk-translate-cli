@@ -1,10 +1,11 @@
 """Fix flow: re-process translated subtitle files without hitting the API.
 
 Available fixes:
-  - rtl: re-wrap dialogue lines with RLI+PDI using \\N separator
+  - rtl: re-wrap dialogue lines with RLI+PDI
   - font: re-embed font using correct ASS UUEncode format
   - style: re-apply font style settings from config
-  - linebreak: convert literal newlines to \\N in dialogue lines
+  - linebreak: ASS -> convert real newlines to \\N; SRT -> convert literal \\N
+    back to real newlines
   - all: apply all fixes
 """
 from __future__ import annotations
@@ -128,35 +129,47 @@ def _fix_ass_file(fpath: Path, fixes: list, backup: bool) -> None:
 
 
 def _fix_srt_file(fpath: Path, fixes: list, backup: bool) -> None:
-    """Apply fixes to an SRT file."""
+    """Apply fixes to an SRT file.
+
+    linebreak: split any literal ``\\N`` (an ASS break wrongly written into SRT)
+               into real physical lines so multi-line cues stop merging.
+    rtl:       strip and re-wrap each physical text line with RLI+PDI so bidi
+               reordering never flips the on-screen line order.
+    """
     content = fpath.read_text(encoding="utf-8")
+
+    do_linebreak = "linebreak" in fixes
+    do_rtl = "rtl" in fixes
+    if not (do_linebreak or do_rtl):
+        return
 
     if backup:
         bak = fpath.with_suffix(fpath.suffix + ".bak")
         bak.write_text(content, encoding="utf-8")
 
     modified = False
+    new_lines = []
+    for line in content.split("\n"):
+        stripped = line.strip()
+        # Preserve sequence numbers, timestamps, and blank lines verbatim.
+        if not stripped or stripped.isdigit() or "-->" in stripped:
+            new_lines.append(line)
+            continue
 
-    # Fix: rtl — re-wrap lines with RLI+PDI
-    if "rtl" in fixes:
-        lines = content.split("\n")
-        new_lines = []
-        for line in lines:
-            stripped = line.strip()
-            # Skip sequence numbers, timestamps, empty lines
-            if not stripped or stripped.isdigit() or "-->" in stripped:
-                new_lines.append(line)
-            else:
-                # Strip existing marks and re-wrap
-                clean = stripped.replace(RLI, "").replace(PDI, "")
-                new_lines.append(RLI + clean + PDI)
-                if line != new_lines[-1]:
-                    modified = True
-        if modified:
-            content = "\n".join(new_lines)
+        segments = stripped.split(r"\N") if do_linebreak else [stripped]
+        rebuilt = []
+        for seg in segments:
+            seg = seg.strip()
+            if do_rtl:
+                seg = RLI + seg.replace(RLI, "").replace(PDI, "") + PDI
+            rebuilt.append(seg)
+        replacement = "\n".join(rebuilt)
+        new_lines.append(replacement)
+        if replacement != line:
+            modified = True
 
     if modified:
-        fpath.write_text(content, encoding="utf-8")
+        fpath.write_text("\n".join(new_lines), encoding="utf-8")
 
 
 def _strip_fonts_section(content: str) -> str:

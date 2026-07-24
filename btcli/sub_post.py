@@ -35,10 +35,15 @@ AVAILABLE_FONTS = [
 
 # ── RTL Wrapping ──────────────────────────────────────────────────────────────
 
-def wrap_rtl(text: str) -> str:
-    """Wrap each line with RLI+PDI bidi marks, using \\N as ASS line break."""
+def wrap_rtl(text: str, line_sep: str = r"\N") -> str:
+    """Wrap each line with RLI+PDI bidi marks.
+
+    Each line is isolated separately so bidi reordering never flips line order.
+    The separator is format-specific: ASS uses ``\\N``; SRT uses a real newline
+    so multi-line cues are not merged onto one physical line.
+    """
     lines = text.split("\n")
-    return r"\N".join(RLI + line + PDI for line in lines)
+    return line_sep.join(RLI + line + PDI for line in lines)
 
 
 # ── Output Path Resolution ────────────────────────────────────────────────────
@@ -393,6 +398,11 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
 
         log.detail(f"  Writing: {fpath.name} ({len(cues)} cues)")
 
+        # Resolve output path first — the RTL line separator depends on format.
+        out_path = resolve_output_path(fpath, suffix=suffix, force_srt=force_srt)
+        is_ass = out_path.suffix.lower() == ".ass" and not force_srt
+        line_sep = r"\N" if is_ass else "\n"
+
         cues.sort(key=lambda x: x[1]["block_idx"])
         untranslated = []
         blocks = []
@@ -402,10 +412,11 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
             pos_tags = m.get("pos_tags", "")
 
             if translated_text is not None:
-                text = pos_tags + wrap_rtl(translated_text) if pos_tags else wrap_rtl(translated_text)
+                wrapped = wrap_rtl(translated_text, line_sep)
             else:
-                text = pos_tags + wrap_rtl(m["text"]) if pos_tags else wrap_rtl(m["text"])
+                wrapped = wrap_rtl(m["text"], line_sep)
                 untranslated.append((tag, m["text"]))
+            text = pos_tags + wrapped if pos_tags else wrapped
 
             blocks.append({
                 "start": m["start"],
@@ -414,10 +425,6 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
                 "block_idx": m["block_idx"],
                 "style": m.get("style", "Default"),
             })
-
-        # Resolve output path
-        out_path = resolve_output_path(fpath, suffix=suffix, force_srt=force_srt)
-        is_ass = out_path.suffix.lower() == ".ass"
 
         # Write output
         if is_ass and not force_srt:
