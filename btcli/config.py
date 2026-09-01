@@ -38,6 +38,7 @@ DEFAULT_SETTINGS = {
         "gemini-3.5-flash",
     ],
     "GEMINI_MAX_OUTPUT_TOKENS": 0,
+    "GEMINI_RESPONSE_SCHEMA": True,
 
     # Translation
     "TRANSLATION_MODE": "chunked",

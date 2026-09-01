@@ -35,23 +35,47 @@ def _wire_text(tag: str, text: str) -> str:
     return f"<BTCLI_ID:{tag}> {protected}"
 
 
-def _wire_payload(payload: dict) -> dict:
-    return {
-        tag: {"id": tag, "text": _wire_text(tag, text)}
+def _wire_items(payload: dict) -> list:
+    """Build the wire payload as a JSON array of {id, text} items.
+
+    An array is used because models reliably mirror this shape, and each item
+    carries its own id so a translation can never be attributed to another cue.
+    """
+    return [
+        {"id": tag, "text": _wire_text(tag, text)}
         for tag, text in payload.items()
+    ]
+
+
+# Wrapper keys a model may wrap the array in (tolerated on input).
+_WRAPPER_KEYS = ("translations", "items", "lines", "results", "data", "output")
+
+
+def _response_schema() -> dict:
+    """Schema pinning the response to an array of {id, text} objects."""
+    return {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "id": {"type": "STRING"},
+                "text": {"type": "STRING"},
+            },
+            "required": ["id", "text"],
+        },
     }
 
 
 def _output_contract(target_lang: str) -> str:
     return (
         "BTCLI OUTPUT CONTRACT (this overrides any earlier output-format wording):\n"
-        "- Every JSON key maps to an object with exactly two fields: id and text.\n"
-        "- Copy the outer JSON key into id, and keep the same <BTCLI_ID:...> token at the start of text.\n"
-        "- The outer key, id field, and inline BTCLI_ID token MUST all identify the same source line.\n"
-        f"- Translate only the text after the inline ID to {target_lang}.\n"
+        "- Return a JSON ARRAY. Each element is an object with exactly two fields: id and text.\n"
+        "- Return one element per source item, in the same order, with the id copied verbatim.\n"
+        "- Keep the <BTCLI_ID:...> token at the start of text, matching that element's id.\n"
+        f"- Translate only the text after the inline ID token to {target_lang}.\n"
         f"- Preserve every {LINE_BREAK_SENTINEL} token exactly; never remove, translate, or move it.\n"
         "- Never merge, split, skip, renumber, or reorder source items.\n"
-        "- Return JSON only, with no markdown or explanation.\n"
+        "- Return JSON only, with no markdown, keys, or explanation around the array.\n"
     )
 
 
@@ -107,29 +131,67 @@ def _restore_line_breaks(text: str, source: str) -> str:
     return _rebalance_line_breaks(restored, source)
 
 
+def _iter_response_items(result):
+    """Yield (outer_key, item) pairs from any supported response shape.
+
+    Supported: a bare array, an array wrapped in a single key, or a keyed object.
+    ``outer_key`` is None for array shapes, where no outer key exists to compare.
+    """
+    if isinstance(result, list):
+        for item in result:
+            yield None, item
+        return
+
+    if isinstance(result, dict):
+        for wrapper in _WRAPPER_KEYS:
+            inner = result.get(wrapper)
+            if isinstance(inner, list):
+                for item in inner:
+                    yield None, item
+                return
+        for key, value in result.items():
+            yield str(key), value
+
+
+def _describe(result) -> str:
+    """Short description of an unexpected response, for diagnostics."""
+    preview = repr(result)
+    if len(preview) > 400:
+        preview = preview[:400] + "..."
+    return f"type={type(result).__name__} preview={preview}"
+
+
 def _normalize_result(result, expected: dict) -> dict:
-    """Validate outer keys against duplicated inline IDs and return safe mappings."""
-    if not isinstance(result, dict):
-        log.detail("    Invalid model response: JSON root is not an object")
+    """Validate returned IDs and return only safely-attributable translations.
+
+    Identity is carried by each item's own ``id`` plus the inline BTCLI_ID token
+    inside the text, so a shifted or merged translation cannot be silently
+    attributed to the wrong cue. Rejected keys are left for targeted retry.
+    """
+    if not isinstance(result, (list, dict)):
+        log.detail(f"    Invalid model response: JSON root is not an array or object ({_describe(result)})")
         return {}
 
     normalized = {}
     seen_ids = set()
     invalid_ids = set()
-    for outer_key, value in result.items():
-        outer_key = str(outer_key)
+    items_seen = 0
+
+    for outer_key, value in _iter_response_items(result):
+        items_seen += 1
+        label = outer_key if outer_key is not None else f"item {items_seen}"
         if not isinstance(value, dict):
-            log.detail(f"    Rejecting {outer_key}: value does not contain id/text fields")
+            log.detail(f"    Rejecting {label}: element does not contain id/text fields")
             continue
         inner_id = str(value.get("id", ""))
         text = value.get("text")
         if not isinstance(text, str):
-            log.detail(f"    Rejecting {outer_key}: translated text is not a string")
+            log.detail(f"    Rejecting {label}: translated text is not a string")
             continue
         match = INLINE_ID_RE.match(text)
         inline_id = match.group(1) if match else ""
         if not inner_id or not inline_id or inner_id != inline_id:
-            log.detail(f"    Rejecting {outer_key}: inner and inline IDs do not match")
+            log.detail(f"    Rejecting {label}: id field and inline ID token do not match")
             continue
         if inner_id not in expected:
             log.detail(f"    Ignoring unexpected inline ID: {inner_id}")
@@ -137,13 +199,11 @@ def _normalize_result(result, expected: dict) -> dict:
         if inner_id in seen_ids:
             log.detail(f"    Rejecting duplicate inline ID: {inner_id}")
             invalid_ids.add(inner_id)
-            normalized.pop(inner_id, None)
             continue
         seen_ids.add(inner_id)
-        if outer_key != inner_id:
-            log.detail(
-                f"    Rejecting {outer_key}: outer key does not match inline ID {inner_id}"
-            )
+        # Keyed-object shape only: the outer key must agree with the inline ID.
+        if outer_key is not None and outer_key != inner_id:
+            log.detail(f"    Rejecting {label}: outer key does not match inline ID {inner_id}")
             invalid_ids.add(inner_id)
             continue
         translated_text = INLINE_ID_RE.sub("", text, count=1)
@@ -151,6 +211,11 @@ def _normalize_result(result, expected: dict) -> dict:
 
     for invalid_id in invalid_ids:
         normalized.pop(invalid_id, None)
+
+    if not normalized:
+        log.detail(f"    No usable translations in response ({items_seen} element(s) parsed)")
+        if items_seen == 0:
+            log.detail(f"    Response shape: {_describe(result)}")
 
     missing = set(expected) - set(normalized)
     if missing:
@@ -185,9 +250,9 @@ async def _enforce_cooldown():
 
 def _build_prompt(chunk: dict, show_name: str = "",
                   source_lang: str = "english", target_lang: str = "arabic") -> str:
-    """Build translation prompt with duplicated JSON and inline IDs."""
+    """Build translation prompt with an inline-ID array payload."""
     template = cfg.get("PROMPT_TEMPLATE", "")
-    wire_json = json.dumps(_wire_payload(chunk), ensure_ascii=False)
+    wire_json = json.dumps(_wire_items(chunk), ensure_ascii=False)
     if template and "{json_blob}" in template:
         name = show_name or "Unknown"
         base = (
@@ -217,7 +282,7 @@ def _build_full_context_prompt(translate_keys: list, full_blob: dict,
         f"{_output_contract(target_lang)}\n"
         f"Return ONLY the requested keys.\n\n"
         f"Full dialogue:\n"
-        f"{json.dumps(_wire_payload(full_blob), ensure_ascii=False)}"
+        f"{json.dumps(_wire_items(full_blob), ensure_ascii=False)}"
     )
 
 
@@ -233,13 +298,19 @@ def _build_retry_prompt(translate_keys: list, context: dict,
         f"{_output_contract(target_lang)}\n"
         f"Return ONLY the requested keys.\n\n"
         f"Dialogue section:\n"
-        f"{json.dumps(_wire_payload(context), ensure_ascii=False)}"
+        f"{json.dumps(_wire_items(context), ensure_ascii=False)}"
     )
 
 
 def _generation_config() -> dict:
-    """Build Gemini generation config."""
+    """Build Gemini generation config.
+
+    When GEMINI_RESPONSE_SCHEMA is enabled the response is structurally pinned
+    to an array of {id, text} objects, so the model cannot pick another shape.
+    """
     gen = {"temperature": 0.1, "responseMimeType": "application/json"}
+    if cfg.get("GEMINI_RESPONSE_SCHEMA", True):
+        gen["responseSchema"] = _response_schema()
     max_out = cfg.get("GEMINI_MAX_OUTPUT_TOKENS", 0)
     if max_out and max_out > 0:
         gen["maxOutputTokens"] = max_out
@@ -390,7 +461,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
         f"You are a professional {source_lang} to {target_lang} subtitle translator.\n"
         f"Context: Subtitles from \"{show_name or 'Unknown'}\".\n\n"
         f"Here is the full dialogue for reference:\n"
-        f"{json.dumps(_wire_payload(full_payload), ensure_ascii=False)}\n\n"
+        f"{json.dumps(_wire_items(full_payload), ensure_ascii=False)}\n\n"
         f"I will send you subsets of keys to translate.\n"
         f"{_output_contract(target_lang)}"
     )
@@ -406,7 +477,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
             f"Translate these keys:\n"
             f"{json.dumps(keys_to_translate)}\n\n"
             f"Values:\n"
-            f"{json.dumps(_wire_payload(chunk), ensure_ascii=False)}"
+            f"{json.dumps(_wire_items(chunk), ensure_ascii=False)}"
         )
 
         current_contents = contents + [{"role": "user", "parts": [{"text": turn_text}]}]

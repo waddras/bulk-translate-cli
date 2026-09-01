@@ -26,10 +26,22 @@ Usage:
 """
 from __future__ import annotations
 
+import re
 import sys
 import time
 from enum import Enum
 from pathlib import Path
+
+# Rich inline style tags to strip from log-file output. Deliberately limited to
+# known style names so bracketed content like "[01]" or "[Fonts]" is preserved.
+_MARKUP_RE = re.compile(
+    r"\[/?(?:bold|dim|italic|underline|green|red|yellow|blue|cyan|magenta|white)"
+    r"(?:\s+\w+)*\]"
+)
+
+
+def _strip_markup(msg: str) -> str:
+    return _MARKUP_RE.sub("", msg)
 
 # ── Verbosity Levels ──────────────────────────────────────────────────────────
 
@@ -113,10 +125,10 @@ class Logger:
     # ── Core Output ───────────────────────────────────────────────────────────
 
     def _write_file(self, msg: str):
-        """Write to log file if configured."""
+        """Write to log file if configured, without rich markup tags."""
         if self._log_fh:
             ts = time.strftime("%H:%M:%S")
-            self._log_fh.write(f"[{ts}] {msg}\n")
+            self._log_fh.write(f"[{ts}] {_strip_markup(msg)}\n")
             self._log_fh.flush()
 
     def _print_plain(self, msg: str):
@@ -159,10 +171,15 @@ class Logger:
         self._print_rich(msg)
 
     def detail(self, msg: str):
-        """Detail/debug message — shown only in full mode."""
-        self._write_file(msg)
+        """Detail/debug message — shown only in full mode.
+
+        _print_rich already writes to the log file, so only write directly when
+        not printing; otherwise the line is duplicated in the log.
+        """
         if self.is_full:
             self._print_rich(msg, style="dim")
+        else:
+            self._write_file(msg)
 
     def success(self, msg: str):
         """Success message — shown in all modes."""
@@ -233,9 +250,10 @@ class Logger:
     def attempt(self, attempt_num: int, max_attempts: int, msg: str):
         """Per-attempt detail — only in full mode."""
         full_msg = f"    Attempt {attempt_num}/{max_attempts} - {msg}"
-        self._write_file(full_msg)
         if self.is_full:
             self._print_rich(full_msg, style="dim yellow")
+        else:
+            self._write_file(full_msg)
 
     def cooldown(self, seconds: float):
         """Cooldown notice."""
