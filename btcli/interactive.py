@@ -85,6 +85,69 @@ def _columns(entries: list, per_row: int = 3, width: int = 26) -> None:
         print("  " + "".join(cell.ljust(width) for cell in row).rstrip())
 
 
+def _resolve_folder_selection(raw: str, count: int) -> list:
+    """Turn a folder selection string into 1-based indices to include.
+
+    Accepts ALL, a list of numbers to include, or a list of -numbers to
+    exclude. Mixing include and exclude numbers is rejected as ambiguous.
+    """
+    pieces = [p.strip() for p in raw.split(",") if p.strip()]
+    if not pieces:
+        raise ValueError("nothing selected")
+
+    if len(pieces) == 1 and pieces[0].lower() == "all":
+        return list(range(1, count + 1))
+
+    includes, excludes = [], []
+    for piece in pieces:
+        if piece.lower() == "all":
+            raise ValueError("'ALL' cannot be combined with numbers")
+        excluded = piece.startswith("-")
+        body = piece[1:].strip() if excluded else piece
+        if not body.isdigit():
+            raise ValueError(f"'{piece}': use numbers, -numbers, or ALL")
+        number = int(body)
+        if not 1 <= number <= count:
+            raise ValueError(f"'{piece}': pick a number between 1 and {count}")
+        (excludes if excluded else includes).append(number)
+
+    if includes and excludes:
+        raise ValueError("cannot mix included and excluded numbers - use one or the other")
+
+    chosen = ([i for i in range(1, count + 1) if i not in excludes]
+              if excludes else sorted(set(includes)))
+    if not chosen:
+        raise ValueError("that would skip every folder")
+    return chosen
+
+
+def _ask_folders(entries: list) -> list:
+    """Show the numbered folder list and return the entries to process."""
+    if len(entries) == 1:
+        return entries
+
+    print("\nFolders found:")
+    for number, (directory, files) in enumerate(entries, 1):
+        print(f"  {number}) {directory.name or directory}   ({len(files)} file(s))")
+    print("  Examples:")
+    print("    ALL       every folder")
+    print("    1,3       only folders 1 and 3")
+    print("    -3        every folder except 3")
+
+    while True:
+        raw = _ask("  Folders to translate", "ALL")
+        try:
+            chosen = _resolve_folder_selection(raw, len(entries))
+        except ValueError as exc:
+            print(f"  {exc}")
+            continue
+        skipped = [entries[i - 1][0].name or entries[i - 1][0]
+                   for i in range(1, len(entries) + 1) if i not in chosen]
+        if skipped:
+            print(f"  Skipping: {', '.join(str(s) for s in skipped)}")
+        return [entries[i - 1] for i in chosen]
+
+
 def _header(title: str) -> None:
     """Section header on stdout, so prompts and headers stay in order."""
     print("\n" + "=" * 60)
@@ -361,21 +424,31 @@ def _run(path: str | None) -> None:
     print(f"\nFound {sum(len(v) for v in grouped.values())} file(s) "
           f"in {len(grouped)} folder(s), one level deep.")
 
-    plans = []
+    # Drop this run's own previous output before counting, so the folder list
+    # shows how many files would actually be translated.
+    entries = []
     for directory, files in grouped.items():
         if mode == "sub":
-            # Never offer this run's own previous output as a source.
             files = [f for f in files if not _is_prior_output(Path(f))]
             if not files:
-                _header(f"FOLDER - {directory.name or directory}")
-                print("  Only previously translated files here - skipping")
+                print(f"  {directory.name or directory}: only previously "
+                      f"translated files - skipping")
                 continue
+        entries.append((directory, [Path(f) for f in files]))
 
+    if not entries:
+        log.error("Nothing left to translate after skipping previous output.")
+        return
+
+    entries = _ask_folders(entries)
+
+    plans = []
+    for directory, files in entries:
         _header(f"FOLDER - {directory.name or directory}  ({len(files)} file(s))")
         if mode == "vid":
-            plan = _plan_video_directory(directory, [Path(f) for f in files])
+            plan = _plan_video_directory(directory, files)
         else:
-            plan = _plan_subtitle_directory(directory, [Path(f) for f in files])
+            plan = _plan_subtitle_directory(directory, files)
         if plan:
             plans.append(plan)
 

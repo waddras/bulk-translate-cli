@@ -214,15 +214,27 @@ Guided translation. Nothing is written or sent until you confirm the summary.
 WHAT IT ASKS
   1. input type: vid (extract tracks from video) or sub (existing subtitles)
   2. path (press Enter for the current directory)
-  3. for EVERY folder found one level deep, it samples ONE file and asks:
+  3. which folders to translate, as a numbered list - skip whole seasons here
+  4. for each CHOSEN folder, it samples ONE file and asks:
        - which subtitle track to use (bitmap tracks are shown but rejected)
        - which styles to translate, as a numbered list
-  4. force re-extraction? (default no)
-  5. files per API call? (default auto)
-  6. a summary, then Proceed? [Y/n]
+  5. force re-extraction? (default no)
+  6. files per API call? (default auto)
+  7. a summary, then Proceed? [Y/n]
 
   Each folder keeps its OWN track and style choice, so a series whose seasons
   differ is handled in one pass.
+
+CHOOSING FOLDERS
+  Skip entire seasons before any track or style questions are asked.
+
+    ALL       every folder                                        (default)
+    1,3       only folders 1 and 3
+    -3        every folder except 3
+    2,4,5     only folders 2, 4 and 5
+
+  Include and exclude numbers cannot be mixed. The prompt is skipped when only
+  one folder was found.
 
 STYLE SELECTION
   The numbered list comes from the sampled file. Numbers and style names may be
