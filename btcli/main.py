@@ -132,6 +132,22 @@ FONTS
   any player can render it. Set it false if your player already has Arabic
   fonts (e.g. Jellyfin's fallback font path) to save ~200KB per file.
 
+SEEING THE WORK FIRST
+  A job can run for the better part of an hour and use a day's request
+  allowance. --dry-run reports the shape of it and stops:
+
+    btcli translate -p PATH --dry-run
+    btcli interactive --dry-run
+
+  It shows the cue count, how many lines survive deduplication and the cache,
+  how many API requests that becomes, the estimated output tokens, and the
+  minimum time the pacing alone will take. It sends nothing, writes no output,
+  and records nothing in the manifest or cache, so it needs no API key.
+
+  With video input it stops before extraction, since extraction writes files.
+  Line counts need an extracted track, so extract once and then dry-run with
+  -i sub for full numbers.
+
 CHECKING YOUR SETTINGS
   settings.conf is validated before any work starts. Errors stop the run;
   warnings are printed and the run continues, unless --strict is given.
@@ -481,6 +497,9 @@ def _parse_args():
                          help="Send N whole subtitle files per API call, ignoring MAX_LINES_PER_CHUNK")
     p_trans.add_argument("--no-cache", action="store_true",
                          help="Ignore the translation cache and re-translate every line")
+    p_trans.add_argument("--dry-run", action="store_true",
+                         help="Report the work, requests and estimated tokens, then stop "
+                              "without sending, writing, or recording anything")
 
     # ── fix ───────────────────────────────────────────────────────────────────
     p_fix = sub.add_parser(
@@ -513,6 +532,9 @@ def _parse_args():
     p_inter.add_argument("-p", default=None, metavar="PATH",
                          help="Skip the path prompt and use this path. Default: ask, "
                               "offering the current directory")
+    p_inter.add_argument("--dry-run", action="store_true",
+                         help="Ask the same questions, then report the work and stop "
+                              "without sending, writing, or recording anything")
 
     # ── update ────────────────────────────────────────────────────────────────
     sub.add_parser(
@@ -632,6 +654,7 @@ def main():
             force=args.force,
             files_per_call=args.files_per_call,
             use_cache=not args.no_cache,
+            dry_run=args.dry_run,
         )
 
         # Offer to re-send only the missing lines, once, at the very end.
@@ -650,7 +673,7 @@ def main():
 
     elif args.command == "interactive":
         from .interactive import run_interactive
-        run_interactive(path=args.p)
+        run_interactive(path=args.p, dry_run=args.dry_run)
 
     elif args.command == "update":
         from .update import run_update

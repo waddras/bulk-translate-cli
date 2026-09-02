@@ -202,6 +202,7 @@ def run_translate(
     use_cache: bool = True,
     write_only: bool = False,
     allow_resume_prompt: bool = True,
+    dry_run: bool = False,
 ) -> dict | None:
     """Run the full translation pipeline.
 
@@ -220,6 +221,8 @@ def run_translate(
         use_cache: consult and update the per-series translation cache
         write_only: make no API calls; assemble files from cached lines and leave
             anything still missing in the source language
+        dry_run: report the work and stop. Makes no request, writes no file, and
+            records nothing in the manifest or cache.
     """
     # Parse language
     source_lang, target_lang = _parse_language(lang)
@@ -229,8 +232,9 @@ def run_translate(
         log.error("--files-per-call must be at least 1")
         return
 
-    from .manifest import ManifestRun
-    manifest_run = ManifestRun({
+    # A dry run records nothing, so it cannot create or modify .btcli.json.
+    from .manifest import ManifestRun, NullManifestRun
+    manifest_run = NullManifestRun() if dry_run else ManifestRun({
         "path": str(Path(path).resolve()),
         "input_type": input_type,
         "source_language": source_lang,
@@ -246,18 +250,22 @@ def run_translate(
         "parallel_chunks": cfg.get("PARALLEL_CHUNKS", 1),
     })
 
-    # API key check
+    # API key check. A dry run never calls the API, so it does not need one.
     api_key = cfg.get("GEMINI_API_KEY", "")
-    if not api_key:
+    if not api_key and dry_run:
+        api_key = ""
+    elif not api_key:
         from .setup_key import check_api_key
         api_key = check_api_key()
         if not api_key:
             return
 
     log.sep()
-    log.phase(f"TRANSLATE - {source_lang} → {target_lang}")
+    log.phase(f"{'DRY RUN' if dry_run else 'TRANSLATE'} - {source_lang} → {target_lang}")
     log.stat("Path", path)
     log.stat("Input", f"{input_type} | Suffix: {suffix} | Force SRT: {force_srt}")
+    if dry_run:
+        log.info("  Nothing will be sent to the API, written, or recorded.")
     log.sep()
 
     # Phase 0: Discover/Extract files
@@ -283,6 +291,25 @@ def run_translate(
             track_indices = track_indices or [0]
 
         tracks = track_indices
+
+        # Extraction writes files, so a dry run stops before it. Line counts are
+        # only knowable once a track has been extracted, so say so plainly rather
+        # than guessing.
+        if dry_run:
+            log.sep()
+            log.phase("DRY RUN - extraction step")
+            log.stat("Videos found", str(len(video_files)))
+            log.stat("Track(s) that would be extracted", ", ".join(map(str, tracks)))
+            for index, video in enumerate(video_files, 1):
+                log.item(f"[{index:02d}] {Path(video).name}")
+            log.info("  Extraction is skipped in a dry run, so cue and line counts "
+                     "are not available for video input.")
+            log.info("  For full numbers, extract once and dry-run with -i sub, "
+                     "or run without --dry-run.")
+            return {"completed": [], "warnings": [], "missing": {},
+                    "files": video_files, "path": path, "dry_run": True,
+                    "previews": []}
+
         log.info(f"Extracting track(s): {tracks}")
         log.sep()
 
@@ -391,6 +418,7 @@ def run_translate(
     all_warnings = []
 
     all_missing: dict = {}
+    previews: list = []
 
     try:
         for batch_num, batch_files in enumerate(batches, 1):
@@ -407,6 +435,8 @@ def run_translate(
                 use_cache=use_cache,
                 write_only=write_only,
                 allow_resume_prompt=allow_resume_prompt,
+                dry_run=dry_run,
+                previews=previews,
             )
             all_completed.extend(batch_completed)
             all_warnings.extend(batch_warnings)
@@ -417,6 +447,16 @@ def run_translate(
                         merged["files"].append(name)
     finally:
         manifest_run.finish()
+
+    if dry_run:
+        from .preview import render_total
+        if len(previews) > 1:
+            render_total(previews)
+        return {"completed": [], "warnings": [], "missing": {}, "files": files,
+                "path": path, "dry_run": True, "previews": previews,
+                "keep_styles": keep_styles, "passthrough_styles": passthrough_styles,
+                "show_name": show_name, "suffix": suffix,
+                "lang": f"{source_lang},{target_lang}", "force_srt": force_srt}
 
     # Final report
     log.sep()
@@ -462,6 +502,8 @@ def _translate_batch(
     use_cache: bool = True,
     write_only: bool = False,
     allow_resume_prompt: bool = True,
+    dry_run: bool = False,
+    previews: list | None = None,
 ) -> tuple:
     """Translate one batch, writing each file as soon as its lines are ready.
 
@@ -583,6 +625,22 @@ def _translate_batch(
         source_lang=source_lang, target_lang=target_lang,
         mode=mode, files_per_call=files_per_call, manifest_run=manifest_run,
     )
+
+    # A dry run stops here: the shape of the work is known, so report it and
+    # make no request, write no file, and record nothing.
+    if dry_run:
+        from .preview import render, summarise
+        summary = summarise(
+            files=files, stats=stats, cached=len(cached_hits), chunks=chunks,
+            required_by_file=writer.required_by_file,
+            tolerance=max(0, cfg.get("PARTIAL_LINE_TOLERANCE", 10)),
+            suffix=suffix, source_lang=source_lang, target_lang=target_lang,
+            mode=mode, files_per_call=files_per_call,
+        )
+        render(summary)
+        if previews is not None:
+            previews.append(summary)
+        return [], [], {}
 
     # Phase 3: Translate. After each response the new lines are written to the
     # cache first, then any file that is now complete is generated, so an

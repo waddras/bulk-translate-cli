@@ -365,14 +365,14 @@ def _print_summary(plans: list, force: bool, files_per_call, suffix: str) -> Non
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def run_interactive(path: str | None = None) -> None:
+def run_interactive(path: str | None = None, dry_run: bool = False) -> None:
     """Guided translation: prompt per directory, then translate each one."""
     if not is_interactive():
         log.error("Interactive mode needs a terminal. Use 'btcli translate' for scripts.")
         return
 
     try:
-        _run(path)
+        _run(path, dry_run=dry_run)
     except Abort as exc:
         print()
         log.warning(f"Cancelled ({exc}). Nothing was written.")
@@ -491,12 +491,12 @@ def _drop_plan(plans: dict) -> None:
         _bad(f"  Enter a number between 1 and {len(ordered)}")
 
 
-def _run(path: str | None) -> None:
+def _run(path: str | None, dry_run: bool = False) -> None:
     """Guided flow as a step machine, so any prompt can step backwards."""
     target_lang = cfg.get("TARGET_LANGUAGE", "arabic")
     suffix = get_suffix_for_lang(target_lang)
 
-    _header("INTERACTIVE")
+    _header("INTERACTIVE - DRY RUN" if dry_run else "INTERACTIVE")
     print(f"  Target language: {target_lang} (from settings.conf)")
     print(f"  Output suffix:   {suffix}")
     _hint("  Type b at any prompt to go back a step.")
@@ -639,6 +639,7 @@ def _run(path: str | None) -> None:
                 force=force,
                 files_per_call=files_per_call,
                 preset_files=[str(f) for f in plan["files"]],
+                dry_run=dry_run,
             )
             if outcome:
                 results.append(outcome)
@@ -649,6 +650,12 @@ def _run(path: str | None) -> None:
         except Exception as exc:
             log.error(f"{plan['dir'].name or plan['dir']} failed: {exc}")
             continue
+
+    if dry_run:
+        # Combine every folder's preview into one total.
+        from .preview import render_total
+        render_total([p for outcome in results for p in outcome.get("previews", [])])
+        return
 
     # One retry offer covering every folder, after they have all been processed.
     from .retry import offer_retry, total_missing

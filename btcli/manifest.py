@@ -106,6 +106,30 @@ def find_reusable_extraction(video_path, tracks: list, suffix: str = "",
     return None
 
 
+class NullManifestRun:
+    """A manifest that records nothing.
+
+    Used by a dry run, which must not create or modify .btcli.json. Accepting the
+    same calls keeps the caller free of dry-run branches.
+    """
+
+    def register_files(self, files: list, series: str = "") -> None:
+        pass
+
+    def update_command(self, **values) -> None:
+        pass
+
+    def record_extraction(self, video_path, tracks: list, extracted_path,
+                          codec: str, reused: bool) -> None:
+        pass
+
+    def record_translation(self, source_path, details: dict) -> None:
+        pass
+
+    def finish(self) -> None:
+        pass
+
+
 class ManifestRun:
     """One btcli translate run, represented once in every touched directory."""
 
