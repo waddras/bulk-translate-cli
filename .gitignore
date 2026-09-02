@@ -37,3 +37,8 @@ settings.conf
 .btcli.json.tmp
 .btcli-cache.json
 .btcli-cache.json.tmp
+
+# Test and tooling artefacts
+.pytest_cache/
+.coverage
+htmlcov/
