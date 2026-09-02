@@ -398,6 +398,39 @@ EXAMPLES
   btcli interactive -p "/media/anime/Chihayafuru"
 """
 
+PRUNE_EPILOG = """\
+btcli leaves two state files beside your media, and both grow without bound:
+
+  .btcli-cache.json   every line ever translated for a series
+  .btcli.json         every job ever run in that folder
+
+Neither is harmful for a long time, but this makes them inspectable and
+trimmable. Running with no options reports sizes and what could be removed
+WITHOUT changing anything.
+
+WHAT GETS REMOVED
+  cache      entries whose source line no longer appears in any subtitle in
+             that folder tree, so they could never be reused from there. Lines
+             still present are always kept, so resuming is unaffected.
+  manifest   job history older than the most recent --keep jobs. Remaining jobs
+             are renumbered so the history stays job1..jobN.
+
+  Cache pruning is per language, since a cache holds each target language
+  separately. Only the language given by -l, or TARGET_LANGUAGE, is touched.
+
+EXAMPLES
+  btcli prune                                 report on the current directory
+  btcli prune -p /media/anime                 report on a whole library
+  btcli prune -p /media/anime --apply         trim both
+  btcli prune --what manifest --keep 3 --apply
+  btcli prune --what cache -l french --apply
+
+NOTES
+  Trimming the cache does not lose translations you still need: an entry is only
+  removed when nothing in the folder tree still contains that source line. If
+  you have moved files elsewhere, prune from the parent so their lines are seen.
+"""
+
 UPDATE_EPILOG = """\
 Update the installed copy of btcli.
 
@@ -544,6 +577,26 @@ def _parse_args():
                          help="Ask the same questions, then report the work and stop "
                               "without sending, writing, or recording anything")
 
+    # ── prune ─────────────────────────────────────────────────────────────────
+    p_prune = sub.add_parser(
+        "prune",
+        help="Inspect and trim the cache and job history btcli leaves beside media",
+        description="Report how much space .btcli-cache.json and .btcli.json use, "
+                    "and optionally trim them. Reports only unless --apply is given.",
+        epilog=PRUNE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_prune.add_argument("-p", default=".", metavar="PATH",
+                         help="Directory to search, at any depth. Default: current directory")
+    p_prune.add_argument("--what", default="all", metavar="TARGETS",
+                         help="What to trim: cache, manifest, all. Default: all")
+    p_prune.add_argument("--keep", type=int, default=10, metavar="N",
+                         help="Job history entries to keep per folder. Default: 10")
+    p_prune.add_argument("--apply", action="store_true",
+                         help="Actually make the changes. Without this, nothing is removed")
+    p_prune.add_argument("-l", default=None, metavar="LANG",
+                         help="Cache language to trim. Default: TARGET_LANGUAGE from settings")
+
     # ── update ────────────────────────────────────────────────────────────────
     sub.add_parser(
         "update",
@@ -682,6 +735,11 @@ def main():
     elif args.command == "interactive":
         from .interactive import run_interactive
         run_interactive(path=args.p, dry_run=args.dry_run)
+
+    elif args.command == "prune":
+        from .prune import run_prune
+        run_prune(path=args.p, what=args.what, keep=args.keep,
+                  apply=args.apply, target_lang=args.l)
 
     elif args.command == "update":
         from .update import run_update

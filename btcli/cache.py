@@ -92,9 +92,9 @@ class TranslationCache:
             log.warning(f"Ignoring unreadable cache {self.path}: {exc}")
             self._entries = {}
 
-    def flush(self) -> None:
+    def flush(self, force: bool = False) -> None:
         """Write the cache to disk, preserving other languages' entries."""
-        if not self._dirty:
+        if not self._dirty and not force:
             return
 
         payload = {"version": CACHE_VERSION, "languages": {}}
@@ -157,6 +157,21 @@ class TranslationCache:
         if added:
             self.flush()
         return added
+
+    @property
+    def entries(self) -> dict:
+        """The stored content-key to translation mapping, read-only by convention."""
+        return self._entries
+
+    def remove_keys(self, keys) -> int:
+        """Drop entries by content key. Used by pruning."""
+        removed = 0
+        for key in list(keys):
+            if self._entries.pop(key, None) is not None:
+                removed += 1
+        if removed:
+            self._dirty = True
+        return removed
 
     def forget(self, payload: dict) -> int:
         """Drop cached entries for these sources (used by --no-cache refresh)."""
