@@ -85,10 +85,24 @@ def test_every_subcommand_is_in_the_readme(command):
     assert f"btcli {command}" in readme(), f"README never shows 'btcli {command}'"
 
 
+def commands_block() -> str:
+    """The 'Commands:' listing from the no-command summary, and only that.
+
+    Checked in isolation because a command name also appears further down in
+    the usage examples, so searching the whole summary would pass even with the
+    command absent from the listing.
+    """
+    summary = run_cli()
+    assert "Commands:" in summary, "the no-command summary lost its listing"
+    after = summary.split("Commands:", 1)[1]
+    return after.split("\n\n", 1)[0]
+
+
 @pytest.mark.parametrize("command", SUBCOMMANDS)
-def test_every_subcommand_is_in_the_no_command_summary(command):
+def test_every_subcommand_is_listed_in_the_no_command_summary(command):
     """The summary is what a user sees when they type btcli and nothing else."""
-    assert command in run_cli()
+    assert command in commands_block(), \
+        f"'{command}' is missing from the Commands: listing"
 
 
 @pytest.mark.parametrize("fix", AVAILABLE_FIXES)
