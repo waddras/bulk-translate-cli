@@ -233,16 +233,31 @@ def _notify_progress(callback, translated: dict) -> None:
 
 # ── Cooldown ──────────────────────────────────────────────────────────────────
 
-async def _enforce_cooldown():
-    """Wait for PARALLEL_COOLDOWN seconds between API calls."""
+def reset_pacing() -> None:
+    """Forget when the last request group ran, so the next one is not delayed."""
     global _last_api_call
-    cooldown = cfg.get("PARALLEL_COOLDOWN", 60)
-    elapsed = time.time() - _last_api_call
-    if _last_api_call > 0 and elapsed < cooldown:
-        wait = cooldown - elapsed
-        log.cooldown(wait)
-        await asyncio.sleep(wait)
-    _last_api_call = time.time()
+    _last_api_call = 0.0
+
+
+async def pace_requests() -> None:
+    """Wait out PARALLEL_COOLDOWN before the next group of requests.
+
+    The time already spent since the previous group counts towards the cooldown,
+    so a call that itself took 40s of a 60s cooldown waits 20s rather than a
+    further 60s. Uses a monotonic clock, so a system time change cannot cause a
+    wait of hours or skip the cooldown entirely.
+
+    Called once per batch in chunked mode, which sends PARALLEL_CHUNKS requests
+    together, and once per request in the modes that send one at a time.
+    """
+    global _last_api_call
+    cooldown = max(0, cfg.get("PARALLEL_COOLDOWN", 60) or 0)
+    if _last_api_call and cooldown:
+        remaining = cooldown - (time.monotonic() - _last_api_call)
+        if remaining > 0:
+            log.cooldown(remaining)
+            await asyncio.sleep(remaining)
+    _last_api_call = time.monotonic()
 
 
 
@@ -459,13 +474,10 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
         log.update_progress(description=f"Translating ({len(failures)} failed)")
         return None
 
-    # Send chunks in parallel batches — cooldown between batches, not individual calls
+    # Send chunks in parallel batches, pacing between batches rather than
+    # between individual calls, so PARALLEL_CHUNKS requests still go out together.
     for batch_start in range(0, total, parallel):
-        # Cooldown before each batch (except first)
-        if batch_start > 0:
-            cooldown = cfg.get("PARALLEL_COOLDOWN", 60)
-            log.cooldown(cooldown)
-            await asyncio.sleep(cooldown)
+        await pace_requests()
 
         batch = chunks[batch_start:batch_start + parallel]
         tasks = [
@@ -533,7 +545,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
             url = f"{GEMINI_BASE}/{model}:generateContent"
             log.detail(f"    Attempt {attempt}/{attempts} - model: {model}")
             try:
-                await _enforce_cooldown()
+                await pace_requests()
                 response = await client.post(
                     url,
                     headers={"x-goog-api-key": api_key},
@@ -589,11 +601,7 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
     failures: list = []
 
     for chunk_num, chunk in enumerate(chunks, 1):
-        # Cooldown between chunks (except first)
-        if chunk_num > 1:
-            cooldown = cfg.get("PARALLEL_COOLDOWN", 60)
-            log.cooldown(cooldown)
-            await asyncio.sleep(cooldown)
+        await pace_requests()
 
         est = estimate_output_tokens(chunk)
         ladder = model_ladder()

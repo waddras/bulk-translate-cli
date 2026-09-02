@@ -57,6 +57,16 @@ def reset_resume_choice():
     translate.reset_resume_choice()
 
 
+@pytest.fixture(autouse=True)
+def reset_request_pacing():
+    """Clear the request pacing clock so tests cannot wait on each other."""
+    from btcli import ai
+
+    ai.reset_pacing()
+    yield
+    ai.reset_pacing()
+
+
 @pytest.fixture
 def no_colour(monkeypatch):
     """Force plain output so assertions can match text directly."""
