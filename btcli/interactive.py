@@ -27,8 +27,10 @@ from .discover import group_by_directory
 from .logger import log
 from .prompts import (
     Abort,
+    BACK,
     ask as _ask,
     ask_choice as _ask_choice,
+    ask_menu as _ask_menu,
     ask_optional_int as _ask_optional_int,
     ask_yes_no as _ask_yes_no,
     bad as _bad,
@@ -79,8 +81,8 @@ def _resolve_folder_selection(raw: str, count: int) -> list:
     return chosen
 
 
-def _ask_folders(entries: list) -> list:
-    """Show the numbered folder list and return the entries to process."""
+def _ask_folders(entries: list):
+    """Show the numbered folder list and return the entries to process, or BACK."""
     if len(entries) == 1:
         return entries
 
@@ -95,7 +97,9 @@ def _ask_folders(entries: list) -> list:
     _hint("    -3        every folder except 3")
 
     while True:
-        raw = _ask("  Folders to translate", "ALL")
+        raw = _ask("  Folders to translate", "ALL", allow_back=True)
+        if raw is BACK:
+            return BACK
         try:
             chosen = _resolve_folder_selection(raw, len(entries))
         except ValueError as exc:
@@ -133,7 +137,9 @@ def _ask_track(tracks: list, bitmap_codecs: set) -> int | None:
     valid = {t["index"] for t in text_tracks}
     default = str(text_tracks[0]["index"])
     while True:
-        answer = _ask("  Track to translate", default)
+        answer = _ask("  Track to translate", default, allow_back=True)
+        if answer is BACK:
+            return BACK
         if not answer.isdigit():
             _bad("  Enter a track number from the list above")
             continue
@@ -205,7 +211,9 @@ def _ask_styles(styles: list, where: str) -> tuple:
     _hint("    +3              passthrough style 3")
 
     while True:
-        raw = _ask("  Styles", DEFAULT_STYLE_SELECTION)
+        raw = _ask("  Styles", DEFAULT_STYLE_SELECTION, allow_back=True)
+        if raw is BACK:
+            return BACK
         try:
             tokens = _resolve_style_tokens(raw, styles)
         except ValueError as exc:
@@ -255,8 +263,12 @@ def _subtitle_files_in(directory: Path) -> list:
 
 # ── Per-directory planning ────────────────────────────────────────────────────
 
-def _plan_video_directory(directory: Path, videos: list) -> dict | None:
-    """Ask for track and styles for one directory of videos."""
+def _plan_video_directory(directory: Path, videos: list):
+    """Ask for track and styles for one directory of videos.
+
+    Returns a plan, None to skip the folder, or BACK. Going back at the style
+    prompt re-asks the track; going back at the track prompt leaves the folder.
+    """
     from .extract import _BITMAP_CODECS, probe_tracks
 
     sample = videos[0]
@@ -268,35 +280,51 @@ def _plan_video_directory(directory: Path, videos: list) -> dict | None:
         _bad(f"  Could not probe this file: {exc}")
         tracks = []
 
-    track_index = None
-    if tracks:
+    if not tracks:
+        return _fallback_to_subtitles(directory)
+
+    while True:
         _show_tracks(tracks, _BITMAP_CODECS)
         track_index = _ask_track(tracks, _BITMAP_CODECS)
+        if track_index is BACK:
+            return BACK
+        if track_index is None:
+            return _fallback_to_subtitles(directory)
 
-    if track_index is None:
-        # Fall back to external subtitle files sitting next to the videos.
-        subtitles = _subtitle_files_in(directory)
-        if not subtitles:
-            _warn("  No usable subtitle tracks and no subtitle files here - skipping")
-            return None
-        _warn(f"  No subtitle tracks found, but {len(subtitles)} subtitle file(s) are here.")
-        if not _ask_yes_no("  Use those subtitle files instead?", True):
-            _warn("  Skipping this folder")
-            return None
-        return _plan_subtitle_directory(directory, subtitles)
+        styles = _styles_from_video(sample, track_index)
+        if not styles:
+            _hint("  This track has no ASS styles (plain text) - "
+                  "all lines will be translated")
+            return {"dir": directory, "mode": "vid", "files": videos,
+                    "track": track_index, "styles_raw": "(no styles)",
+                    "keep": None, "passthrough": None}
 
-    styles = _styles_from_video(sample, track_index)
-    if not styles:
-        _hint("  This track has no ASS styles (plain text) - all lines will be translated")
-        return {"dir": directory, "mode": "vid", "files": videos, "track": track_index,
-                "styles_raw": "(no styles)", "keep": None, "passthrough": None}
-
-    raw, keep, passthrough = _ask_styles(styles, f"track {track_index}")
-    return {"dir": directory, "mode": "vid", "files": videos, "track": track_index,
-            "styles_raw": raw, "keep": keep, "passthrough": passthrough}
+        chosen = _ask_styles(styles, f"track {track_index}")
+        if chosen is BACK:
+            continue          # back to the track prompt for this folder
+        raw, keep, passthrough = chosen
+        return {"dir": directory, "mode": "vid", "files": videos,
+                "track": track_index, "styles_raw": raw,
+                "keep": keep, "passthrough": passthrough}
 
 
-def _plan_subtitle_directory(directory: Path, subtitles: list) -> dict | None:
+def _fallback_to_subtitles(directory: Path):
+    """Offer sibling subtitle files when a video has no usable tracks."""
+    subtitles = _subtitle_files_in(directory)
+    if not subtitles:
+        _warn("  No usable subtitle tracks and no subtitle files here - skipping")
+        return None
+    _warn(f"  No subtitle tracks found, but {len(subtitles)} subtitle file(s) are here.")
+    answer = _ask_yes_no("  Use those subtitle files instead?", True, allow_back=True)
+    if answer is BACK:
+        return BACK
+    if not answer:
+        _warn("  Skipping this folder")
+        return None
+    return _plan_subtitle_directory(directory, subtitles)
+
+
+def _plan_subtitle_directory(directory: Path, subtitles: list):
     """Ask for styles for one directory of subtitle files."""
     from .srt_pre import get_styles_from_file
 
@@ -309,7 +337,10 @@ def _plan_subtitle_directory(directory: Path, subtitles: list) -> dict | None:
         return {"dir": directory, "mode": "sub", "files": subtitles, "track": None,
                 "styles_raw": "(no styles)", "keep": None, "passthrough": None}
 
-    raw, keep, passthrough = _ask_styles(styles, sample.name)
+    chosen = _ask_styles(styles, sample.name)
+    if chosen is BACK:
+        return BACK
+    raw, keep, passthrough = chosen
     return {"dir": directory, "mode": "sub", "files": subtitles, "track": None,
             "styles_raw": raw, "keep": keep, "passthrough": passthrough}
 
@@ -350,74 +381,247 @@ def run_interactive(path: str | None = None) -> None:
         log.warning("Cancelled. Nothing was written.")
 
 
-def _run(path: str | None) -> None:
-    target_lang = cfg.get("TARGET_LANGUAGE", "arabic")
-    suffix = get_suffix_for_lang(target_lang)
-
-    _header("INTERACTIVE")
-    print(f"  Target language: {target_lang} (from settings.conf)")
-    print(f"  Output suffix:   {suffix}")
-    print("=" * 60)
-
-    mode = _ask_choice("Input type: extract from video, or use subtitle files",
-                       ["vid", "sub"], "vid")
-
-    if path is None:
-        path = _ask("Path", str(Path.cwd()))
-    root = Path(path).expanduser()
-    if not root.exists():
-        log.error(f"Path does not exist: {root}")
-        return
-
+def _discover_entries(mode: str, root: Path):
+    """Group files one level deep, dropping this run's own previous output."""
     grouped = group_by_directory(str(root), mode=mode)
     if not grouped:
         kind = "video" if mode == "vid" else "subtitle"
         log.error(f"No {kind} files found in: {root}")
-        return
+        return None
 
     print(f"\nFound {sum(len(v) for v in grouped.values())} file(s) "
           f"in {len(grouped)} folder(s), one level deep.")
 
-    # Drop this run's own previous output before counting, so the folder list
-    # shows how many files would actually be translated.
     entries = []
     for directory, files in grouped.items():
         if mode == "sub":
             files = [f for f in files if not _is_prior_output(Path(f))]
             if not files:
-                print(f"  {directory.name or directory}: only previously "
+                _hint(f"  {directory.name or directory}: only previously "
                       f"translated files - skipping")
                 continue
         entries.append((directory, [Path(f) for f in files]))
 
     if not entries:
         log.error("Nothing left to translate after skipping previous output.")
+        return None
+    return entries
+
+
+def _plan_one(mode: str, directory: Path, files: list):
+    """Ask the questions for a single folder. Returns plan, None, or BACK."""
+    _header(f"FOLDER - {directory.name or directory}  ({len(files)} file(s))")
+    if mode == "vid":
+        return _plan_video_directory(directory, files)
+    return _plan_subtitle_directory(directory, files)
+
+
+def _plan_folders(mode: str, entries: list, plans: dict):
+    """Walk the chosen folders, allowing back to step to the previous folder.
+
+    plans is keyed by folder index so answers survive stepping backwards and
+    forwards. Returns True when complete, or BACK to leave the folder picker.
+    """
+    index = 0
+    while index < len(entries):
+        directory, files = entries[index]
+        if index in plans:
+            index += 1
+            continue
+
+        outcome = _plan_one(mode, directory, files)
+        if outcome is BACK:
+            if index == 0:
+                return BACK           # back past the first folder: re-pick folders
+            index -= 1
+            plans.pop(index, None)    # discard so the earlier folder is re-asked
+            continue
+        plans[index] = outcome        # a plan, or None to skip this folder
+        index += 1
+    return True
+
+
+def _edit_plan(mode: str, entries: list, plans: dict) -> None:
+    """Redo the questions for one folder chosen by number."""
+    ordered = [i for i in sorted(plans) if plans[i]]
+    if not ordered:
         return
-
-    entries = _ask_folders(entries)
-
-    plans = []
-    for directory, files in entries:
-        _header(f"FOLDER - {directory.name or directory}  ({len(files)} file(s))")
-        if mode == "vid":
-            plan = _plan_video_directory(directory, files)
-        else:
-            plan = _plan_subtitle_directory(directory, files)
-        if plan:
-            plans.append(plan)
-
-    if not plans:
-        log.warning("Nothing selected. Nothing was written.")
-        return
-
+    from .prompts import ITEM, paint
     print()
-    force = _ask_yes_no("Force re-extraction (ignore previous extractions)?", False)
-    files_per_call = _ask_optional_int("Files per API call", "auto")
+    for position, index in enumerate(ordered, 1):
+        name = plans[index]["dir"].name or plans[index]["dir"]
+        print("  " + paint(f"{position})", ITEM) + f" {name}")
 
-    _print_summary(plans, force, files_per_call, suffix)
-    if not _ask_yes_no("Proceed with translation?", True):
-        log.warning("Cancelled. Nothing was written.")
+    while True:
+        answer = _ask("  Which folder to redo", "1", allow_back=True)
+        if answer is BACK:
+            return
+        if answer.isdigit() and 1 <= int(answer) <= len(ordered):
+            index = ordered[int(answer) - 1]
+            directory, files = entries[index]
+            outcome = _plan_one(mode, directory, files)
+            if outcome is not BACK:
+                plans[index] = outcome
+            return
+        _bad(f"  Enter a number between 1 and {len(ordered)}")
+
+
+def _drop_plan(plans: dict) -> None:
+    """Remove one folder from the plan, chosen by number."""
+    ordered = [i for i in sorted(plans) if plans[i]]
+    if len(ordered) <= 1:
+        _warn("  Only one folder left - cannot drop it.")
         return
+    from .prompts import ITEM, paint
+    print()
+    for position, index in enumerate(ordered, 1):
+        name = plans[index]["dir"].name or plans[index]["dir"]
+        print("  " + paint(f"{position})", ITEM) + f" {name}")
+
+    while True:
+        answer = _ask("  Which folder to drop", "1", allow_back=True)
+        if answer is BACK:
+            return
+        if answer.isdigit() and 1 <= int(answer) <= len(ordered):
+            index = ordered[int(answer) - 1]
+            name = plans[index]["dir"].name or plans[index]["dir"]
+            plans[index] = None
+            _warn(f"  Dropped {name}")
+            return
+        _bad(f"  Enter a number between 1 and {len(ordered)}")
+
+
+def _run(path: str | None) -> None:
+    """Guided flow as a step machine, so any prompt can step backwards."""
+    target_lang = cfg.get("TARGET_LANGUAGE", "arabic")
+    suffix = get_suffix_for_lang(target_lang)
+
+    _header("INTERACTIVE")
+    print(f"  Target language: {target_lang} (from settings.conf)")
+    print(f"  Output suffix:   {suffix}")
+    _hint("  Type b at any prompt to go back a step.")
+    print("=" * 60)
+
+    given_path = path
+    state: dict = {"plans": {}}
+    step = 0
+    STEPS = ("mode", "path", "folders", "plan", "force", "fpc", "confirm")
+
+    while True:
+        name = STEPS[step]
+
+        if name == "mode":
+            answer = _ask_choice("Input type: extract from video, or use subtitle files",
+                                 ["vid", "sub"], state.get("mode", "vid"))
+            if answer is BACK:
+                _hint("  Already at the first question.")
+                continue
+            if answer != state.get("mode"):
+                state["plans"] = {}          # folders differ per input type
+                state.pop("entries", None)
+            state["mode"] = answer
+            step += 1
+
+        elif name == "path":
+            if given_path is not None:
+                state["path"] = given_path
+                step += 1
+                continue
+            answer = _ask("Path", state.get("path", str(Path.cwd())), allow_back=True)
+            if answer is BACK:
+                step -= 1
+                continue
+            root = Path(answer).expanduser()
+            if not root.exists():
+                log.error(f"Path does not exist: {root}")
+                continue
+            if answer != state.get("path"):
+                state["plans"] = {}
+                state.pop("entries", None)
+            state["path"] = answer
+            step += 1
+
+        elif name == "folders":
+            if "entries" not in state:
+                found = _discover_entries(state["mode"], Path(state["path"]).expanduser())
+                if found is None:
+                    return
+                state["all_entries"] = found
+            chosen = _ask_folders(state.get("all_entries", []))
+            if chosen is BACK:
+                step -= 1
+                state.pop("entries", None)
+                continue
+            if chosen != state.get("entries"):
+                state["plans"] = {}
+            state["entries"] = chosen
+            step += 1
+
+        elif name == "plan":
+            outcome = _plan_folders(state["mode"], state["entries"], state["plans"])
+            if outcome is BACK:
+                step -= 1
+                continue
+            if not any(state["plans"].values()):
+                log.warning("Nothing selected. Nothing was written.")
+                return
+            step += 1
+
+        elif name == "force":
+            answer = _ask_yes_no("Force re-extraction (ignore previous extractions)?",
+                                 state.get("force", False), allow_back=True)
+            if answer is BACK:
+                # Step back into the last folder's questions.
+                ordered = [i for i in sorted(state["plans"]) if state["plans"][i]]
+                if ordered:
+                    state["plans"].pop(ordered[-1], None)
+                step -= 1
+                continue
+            state["force"] = answer
+            step += 1
+
+        elif name == "fpc":
+            answer = _ask_optional_int("Files per API call", "auto", allow_back=True)
+            if answer is BACK:
+                step -= 1
+                continue
+            state["fpc"] = answer
+            step += 1
+
+        else:  # confirm
+            plans = [state["plans"][i] for i in sorted(state["plans"]) if state["plans"][i]]
+            _print_summary(plans, state["force"], state["fpc"], suffix)
+            choice = _ask_menu(
+                "  What next?",
+                [
+                    ("y", "proceed with translation"),
+                    ("e", "edit a folder (redo its track and styles)"),
+                    ("d", "drop a folder from the plan"),
+                    ("n", "cancel"),
+                ],
+                default="y",
+                allow_back=True,
+            )
+            if choice is BACK:
+                step -= 1
+                continue
+            if choice == "n":
+                log.warning("Cancelled. Nothing was written.")
+                return
+            if choice == "e":
+                _edit_plan(state["mode"], state["entries"], state["plans"])
+                continue
+            if choice == "d":
+                _drop_plan(state["plans"])
+                if not any(state["plans"].values()):
+                    log.warning("Every folder dropped. Nothing was written.")
+                    return
+                continue
+            break
+
+    plans = [state["plans"][i] for i in sorted(state["plans"]) if state["plans"][i]]
+    force = state["force"]
+    files_per_call = state["fpc"]
 
     from .translate import run_translate
 

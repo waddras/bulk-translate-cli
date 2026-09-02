@@ -304,6 +304,27 @@ WHAT IT ASKS
   Each folder keeps its OWN track and style choice, so a series whose seasons
   differ is handled in one pass.
 
+GOING BACK
+  Type b (or back) at ANY prompt to return to the previous question. Answers
+  already given are kept, so stepping back and forward again does not make you
+  retype them.
+
+    at the style prompt      returns to the track prompt for that folder
+    at the track prompt      returns to the previous folder
+    at the first folder      returns to the folder picker
+    at the folder picker     returns to the path
+    at force / files-per-call / the summary
+                             returns one step back, and from force back into
+                             the last folder's questions
+
+  The summary also offers direct edits without stepping back through
+  everything:
+
+    [e] edit a folder   redo just that folder's track and styles
+    [d] drop a folder   remove it from the plan entirely
+
+  Nothing is sent or written until you choose to proceed.
+
 CHOOSING FOLDERS
   Skip entire seasons before any track or style questions are asked.
 
