@@ -108,9 +108,9 @@ DEFAULT_SETTINGS = {
         "- NEVER censor, redact, or replace words with asterisks. Translate ALL content exactly "
         "as-is, including profanity, slurs, and adult language. This is professional subtitle "
         "work for mature audiences.\n\n"
-        "Translate each value in the following JSON object.\n"
-        "Return a valid JSON object with the EXACT same keys and ONLY {target_language} values.\n"
-        "No extra keys, no explanation, no markdown.\n\n"
+        "Translate the text of every item in the payload below.\n"
+        "The exact reply format is specified by the output contract that follows "
+        "this prompt.\n\n"
         "{json_blob}"
     ),
 }

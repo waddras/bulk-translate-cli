@@ -132,6 +132,17 @@ FONTS
   any player can render it. Set it false if your player already has Arabic
   fonts (e.g. Jellyfin's fallback font path) to save ~200KB per file.
 
+CHECKING YOUR SETTINGS
+  settings.conf is validated before any work starts. Errors stop the run;
+  warnings are printed and the run continues, unless --strict is given.
+
+    btcli --check-settings        validate and exit, doing no work
+    btcli --strict translate ...  refuse to run if anything looks wrong
+
+  Warnings catch quiet mistakes rather than crashes, for example a MODEL_POOL
+  that repeats a model, or a RETRY_ATTEMPTS lower than the number of models
+  configured.
+
 CONFIGURATION (first match wins)
   ./settings.conf                     current directory (careful: takes priority)
   /opt/btcli/settings.conf            normal location
@@ -404,6 +415,10 @@ def _parse_args():
     # Log file
     parser.add_argument("--log-file", default=None, metavar="PATH",
                         help="Write all output to a log file, at full detail regardless of verbosity")
+    parser.add_argument("--strict", action="store_true",
+                        help="Treat settings.conf warnings as fatal instead of continuing")
+    parser.add_argument("--check-settings", action="store_true",
+                        help="Validate settings.conf and exit without doing any work")
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND",
                                 help="Command to run (see 'btcli COMMAND -h')")
@@ -527,6 +542,20 @@ def main():
         log.set_log_file(args.log_file)
 
     log.start_timer()
+
+    # Validate settings before any work: a mistake here used to surface only as a
+    # confusing runtime failure, or as silently degraded behaviour.
+    from .validate import report_settings
+    if args.check_settings:
+        from .config import _settings_file
+        log.info(f"Checking {_settings_file or 'built-in defaults'}")
+        ok = report_settings(strict=args.strict)
+        if ok:
+            log.success("settings.conf looks good.")
+        sys.exit(0 if ok else 1)
+
+    if not report_settings(strict=args.strict):
+        sys.exit(1)
 
     if not args.command:
         print("No command specified. Run 'btcli -h' for full help,")
