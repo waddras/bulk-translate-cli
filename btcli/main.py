@@ -574,7 +574,7 @@ def _parse_args():
     p_fix.add_argument("-f", default=".ar.", metavar="FILTER",
                        help="Only files whose name contains this substring. Default: '.ar.'")
     p_fix.add_argument("--apply", default="all", metavar="FIXES",
-                       help="Fixes to apply: rtl, font, style, linebreak, all (comma-separated). Default: all")
+                       help="Fixes to apply: rtl, font, font-strip, style, linebreak, all (comma-separated). Default: all, which is every fix except font-strip")
     p_fix.add_argument("--backup", action="store_true",
                        help="Write a .bak copy before overwriting each file")
 
@@ -682,7 +682,7 @@ def main():
         print("                  [--auto] [--force] [--files-per-call N]")
         print("                  [--dry-run] [--no-cache]")
         print("  btcli fix -p PATH [-f FILTER] [--apply rtl,font,style,linebreak,font-strip,all] [--backup]")
-        print("  btcli prune [-p PATH] [--what cache,jobs,all] [--keep N] [--apply]")
+        print("  btcli prune [-p PATH] [--what cache,manifest,all] [--keep N] [--apply]")
         print("  btcli update [--check] [--branch NAME] [--stash]\n")
         print("Paths default to the current directory; scanning stops one directory deep.\n")
         print("See what would happen before spending any API quota:")
