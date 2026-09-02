@@ -260,6 +260,23 @@ async def pace_requests() -> None:
     _last_api_call = time.monotonic()
 
 
+async def backoff_before_retry(attempt: int, attempts: int) -> bool:
+    """Wait before retrying, unless there is no point waiting. Returns True if it waited.
+
+    Skipped when this was the last attempt, and when the next attempt moves to a
+    different model — a fresh model has its own quota, so waiting on the one that
+    just failed achieves nothing.
+
+    The wait grows with the attempt number, which is what RETRY_COOLDOWN
+    documents. Every retry path uses this, so a 429 and a parse failure back off
+    the same way.
+    """
+    if attempt >= attempts or _switching_model(attempt):
+        return False
+    cooldown = max(0, cfg.get("RETRY_COOLDOWN", 10) or 0)
+    await asyncio.sleep(cooldown * attempt)
+    return True
+
 
 # ── Prompt Building ───────────────────────────────────────────────────────────
 
@@ -427,8 +444,6 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
     from .blob import estimate_output_tokens
 
     translated = {}
-    retry_attempts = cfg.get("RETRY_ATTEMPTS", 5)
-    retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
     parallel = max(1, cfg.get("PARALLEL_CHUNKS", 1))
     total = len(chunks)
     failures: list = []
@@ -459,11 +474,7 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
                 log.attempt(attempt, attempts, f"{model}: response failed ID validation")
             else:
                 log.attempt(attempt, attempts, f"{model}: failed")
-            if attempt < attempts:
-                # Switch model immediately; only back off once every model has
-                # been tried and the ladder starts repeating.
-                if not _switching_model(attempt):
-                    await asyncio.sleep(retry_cooldown * attempt)
+            await backoff_before_retry(attempt, attempts)
 
         # A failed chunk is deliberately NOT counted as progress: completing the
         # bar stops its elapsed clock, which reads as a frozen display while
@@ -508,7 +519,6 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
 
     translated = {}
     gen_cfg = _generation_config()
-    retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
     ladder = model_ladder()
     attempts = effective_attempts()
     failures: list = []
@@ -556,8 +566,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                     # Rate limited: move to the next model at once rather than
                     # waiting on a model that is already out of quota.
                     log.attempt(attempt, attempts, f"{model}: rate limited")
-                    if attempt < attempts and not _switching_model(attempt):
-                        await asyncio.sleep(retry_cooldown * attempt)
+                    await backoff_before_retry(attempt, attempts)
                     continue
                 response.raise_for_status()
                 raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -574,8 +583,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                 break
             except Exception as e:
                 log.attempt(attempt, attempts, f"{model}: {e}")
-                if attempt < attempts and not _switching_model(attempt):
-                    await asyncio.sleep(retry_cooldown)
+                await backoff_before_retry(attempt, attempts)
         else:
             failures.append(chunk_num)
             log.chunk_fail(chunk_num, f"after {attempts} attempts across "
@@ -596,8 +604,6 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
     from .blob import estimate_output_tokens
 
     translated = {}
-    retry_attempts = cfg.get("RETRY_ATTEMPTS", 5)
-    retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
     failures: list = []
 
     for chunk_num, chunk in enumerate(chunks, 1):
@@ -627,12 +633,10 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
                     log.advance_progress()
                     break
                 log.attempt(attempt, attempts, f"{model}: response failed ID validation")
-                if attempt < attempts and not _switching_model(attempt):
-                    await asyncio.sleep(retry_cooldown * attempt)
+                await backoff_before_retry(attempt, attempts)
             else:
                 log.attempt(attempt, attempts, f"{model}: failed")
-                if attempt < attempts and not _switching_model(attempt):
-                    await asyncio.sleep(retry_cooldown * attempt)
+                await backoff_before_retry(attempt, attempts)
         else:
             failures.append(chunk_num)
             log.chunk_fail(chunk_num, f"after {attempts} attempts across "
@@ -692,7 +696,6 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
     """Retry translation of missing keys with context + model cycling."""
     recovered = {}
     max_retries = cfg.get("MAX_FAILED_CHUNKS", 5)
-    retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
     remaining = set(missing_keys)
 
     for retry_round in range(1, max_retries + 1):
@@ -739,8 +742,7 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
                     log.attempt(attempt, attempts, f"{model}: response failed ID validation")
                 else:
                     log.attempt(attempt, attempts, f"{model}: retry failed")
-                if attempt < attempts and not _switching_model(attempt):
-                    await asyncio.sleep(retry_cooldown)
+                await backoff_before_retry(attempt, attempts)
 
             log.advance_progress()
 

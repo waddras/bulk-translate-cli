@@ -27,7 +27,6 @@ Usage:
 from __future__ import annotations
 
 import re
-import sys
 import time
 from enum import Enum
 from pathlib import Path
@@ -68,11 +67,16 @@ class Logger:
 
         try:
             from rich.console import Console
-            from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
-            self._rich_available = True
-            self._console = Console(stderr=True)
         except ImportError:
             self._rich_available = False
+        else:
+            # start_progress() imports rich.progress when it runs, which is too
+            # late to fall back on plain output. Confirm the submodule is there
+            # now, while there is still a choice.
+            from importlib.util import find_spec
+            self._rich_available = find_spec("rich.progress") is not None
+            if self._rich_available:
+                self._console = Console(stderr=True)
 
     # ── Configuration ─────────────────────────────────────────────────────────
 

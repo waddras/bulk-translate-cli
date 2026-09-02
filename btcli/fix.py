@@ -10,7 +10,6 @@ Available fixes:
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pysubs2
@@ -19,7 +18,7 @@ from .config import cfg
 from .discover import discover_files
 from .logger import log
 from .sub_post import (
-    RLI, PDI, wrap_rtl, embed_font_in_ass, _build_ass_style,
+    RLI, PDI, embed_font_in_ass, _build_ass_style,
 )
 
 AVAILABLE_FIXES = ["rtl", "font", "font-strip", "style", "linebreak", "all"]
@@ -99,7 +98,7 @@ def _fix_ass_file(fpath: Path, fixes: list, backup: bool) -> None:
         new_style = _build_ass_style()
         subs.styles["Default"] = new_style
         modified = True
-        log.detail(f"        Applied style fix")
+        log.detail("        Applied style fix")
 
     # Fix: linebreak — convert literal newlines to \N
     if "linebreak" in fixes:
@@ -107,7 +106,7 @@ def _fix_ass_file(fpath: Path, fixes: list, backup: bool) -> None:
             if "\n" in event.text:
                 event.text = event.text.replace("\n", r"\N")
                 modified = True
-        log.detail(f"        Applied linebreak fix")
+        log.detail("        Applied linebreak fix")
 
     # Fix: rtl — re-wrap with RLI+PDI
     if "rtl" in fixes:
@@ -120,7 +119,7 @@ def _fix_ass_file(fpath: Path, fixes: list, backup: bool) -> None:
             if event.text != wrapped:
                 event.text = wrapped
                 modified = True
-        log.detail(f"        Applied RTL fix")
+        log.detail("        Applied RTL fix")
 
     if modified:
         content = subs.to_string("ass")

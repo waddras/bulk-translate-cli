@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .config import cfg
 from .discover import discover_files
 from .extract import probe_tracks
 from .logger import log
@@ -48,7 +47,7 @@ def _probe_video_files(files: list, show_tags: bool = False, show_styles: bool =
             log.item(f"[{i:02d}] {fpath.name}:")
 
             if not tracks:
-                log.detail(f"        No subtitle tracks found")
+                log.detail("        No subtitle tracks found")
                 continue
 
             # For each track, show info + optionally styles/tags
@@ -124,7 +123,7 @@ def _probe_subtitle_files(files: list, show_tags: bool = False) -> dict:
         if styles:
             log.info(f"        Styles: {', '.join(styles)}")
         else:
-            log.info(f"        Styles: (none / SRT format)")
+            log.info("        Styles: (none / SRT format)")
         if show_tags and info["tags"]:
             log.info(f"        Tags: {', '.join(info['tags'])}")
 

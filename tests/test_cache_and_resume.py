@@ -7,9 +7,7 @@ empty cache was falsy, so nothing was ever saved on a first run.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-import pysubs2
 
 from btcli.cache import TranslationCache, series_root_for
 from btcli.translate import run_translate

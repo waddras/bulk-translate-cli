@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pysubs2
 
-from .config import cfg
 from .logger import log
 
 
@@ -241,7 +240,7 @@ def validate_track_indices(filepath: str, track_indices: list) -> list:
         log.info(f"    Auto-selected track {first_text} ({tracks[first_text]['codec']})")
         return [first_text]
 
-    log.warning(f"    No text-based subtitle tracks found")
+    log.warning("    No text-based subtitle tracks found")
     return track_indices  # Let it fail downstream
 
 

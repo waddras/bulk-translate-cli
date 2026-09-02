@@ -6,7 +6,6 @@ here is total: no API call, no output file, no manifest, no cache entry.
 """
 from __future__ import annotations
 
-import pysubs2
 
 from btcli.preview import _humanise, summarise
 from btcli.translate import run_translate

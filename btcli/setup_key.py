@@ -24,7 +24,7 @@ def check_api_key() -> str | None:
     if answer in ("", "y", "yes"):
         if key_file.exists():
             print(f"\nKey file exists at: {key_file}")
-            print(f"Edit it and add your key:")
+            print("Edit it and add your key:")
             print(f"  nano {key_file}")
             return None
         else:
@@ -51,8 +51,8 @@ def check_api_key() -> str | None:
 
 def _print_instructions(key_file: Path):
     """Print manual setup instructions."""
-    print(f"\nSetup instructions:")
+    print("\nSetup instructions:")
     print(f"  echo 'GEMINI_API_KEY=your-key-here' > {key_file}")
     print(f"  chmod 600 {key_file}")
-    print(f"\nOr set environment variable:")
-    print(f"  export GEMINI_API_KEY=\"your-key-here\"")
+    print("\nOr set environment variable:")
+    print("  export GEMINI_API_KEY=\"your-key-here\"")

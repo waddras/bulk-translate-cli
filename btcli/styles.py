@@ -16,9 +16,7 @@ Examples:
 from __future__ import annotations
 
 import pysubs2
-from pathlib import Path
 
-from .config import cfg
 from .logger import log
 from .srt_pre import _clean_event_text
 

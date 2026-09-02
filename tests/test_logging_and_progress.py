@@ -6,7 +6,6 @@ progress and completed the task while retries were still running.
 """
 from __future__ import annotations
 
-import os
 
 from btcli import prompts
 from btcli.logger import Logger

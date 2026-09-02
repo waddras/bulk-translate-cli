@@ -32,6 +32,11 @@ jobs:
       - name: Check every module imports
         run: python -m compileall -q btcli
 
+      - name: Lint for dead code and undefined names
+        run: |
+          pip install pyflakes
+          python -m pyflakes btcli tests
+
       - name: Run tests
         run: python -m pytest
 

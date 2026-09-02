@@ -12,7 +12,6 @@ Reporting is the default. Nothing is deleted without --apply.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from .cache import CACHE_NAME, TranslationCache, _key

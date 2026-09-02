@@ -18,7 +18,6 @@ Style selection accepts the same syntax as -s, plus list numbers:
 """
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 
@@ -35,7 +34,6 @@ from .prompts import (
     ask_yes_no as _ask_yes_no,
     bad as _bad,
     columns as _columns,
-    good as _good,
     header as _header,
     hint as _hint,
     is_interactive,
