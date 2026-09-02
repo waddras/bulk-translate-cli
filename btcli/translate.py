@@ -130,6 +130,47 @@ def _detect_show_name(files: list) -> str:
 
 # ── Language Parsing ──────────────────────────────────────────────────────────
 
+# ── Resume decision ───────────────────────────────────────────────────────────
+
+# Asked at most once per process: a series with many season folders should not
+# ask the same question for every folder.
+_resume_choice: bool | None = None
+
+
+def reset_resume_choice() -> None:
+    """Forget the resume answer, so the next job asks again."""
+    global _resume_choice
+    _resume_choice = None
+
+
+def _ask_resume(cached: int, missing: int, cache_path) -> bool:
+    """Ask whether to reuse cached lines. Remembered for the rest of the run."""
+    global _resume_choice
+    if _resume_choice is not None:
+        return _resume_choice
+
+    from .prompts import ask_yes_no, hint, is_interactive
+
+    if not is_interactive() or not cfg.get("RESUME_PROMPT", True):
+        _resume_choice = True
+        return True
+
+    total = cached + missing
+    percent = round(cached / total * 100) if total else 0
+    from .prompts import header
+    header("CACHED TRANSLATIONS FOUND")
+    print(f"  {cached} of {total} line(s) ({percent}%) were already translated "
+          f"in an earlier run.")
+    hint(f"  Cache: {cache_path}")
+    hint("  Resuming sends only the missing lines. Declining re-translates "
+         "everything and costs full quota.")
+    _resume_choice = ask_yes_no(
+        f"  Resume and translate only the {missing} missing line(s)?", True)
+    if not _resume_choice:
+        log.warning("  Ignoring cached lines for this run - translating everything.")
+    return _resume_choice
+
+
 def _parse_language(lang_arg: str) -> tuple:
     """Parse language argument into (source_lang, target_lang).
 
@@ -161,6 +202,8 @@ def run_translate(
     files_per_call: int | None = None,
     preset_files: list | None = None,
     use_cache: bool = True,
+    write_only: bool = False,
+    allow_resume_prompt: bool = True,
 ) -> dict | None:
     """Run the full translation pipeline.
 
@@ -176,6 +219,9 @@ def run_translate(
         preset_files: explicit input files, skipping discovery. Interactive mode
             uses this so a per-directory run cannot pick up a sibling
             directory's files.
+        use_cache: consult and update the per-series translation cache
+        write_only: make no API calls; assemble files from cached lines and leave
+            anything still missing in the source language
     """
     # Parse language
     source_lang, target_lang = _parse_language(lang)
@@ -346,7 +392,7 @@ def run_translate(
     all_completed = []
     all_warnings = []
 
-    all_missing = set()
+    all_missing: dict = {}
 
     try:
         for batch_num, batch_files in enumerate(batches, 1):
@@ -361,10 +407,16 @@ def run_translate(
                 files_per_call=files_per_call,
                 manifest_run=manifest_run,
                 use_cache=use_cache,
+                write_only=write_only,
+                allow_resume_prompt=allow_resume_prompt,
             )
             all_completed.extend(batch_completed)
             all_warnings.extend(batch_warnings)
-            all_missing |= batch_missing
+            for key, info in batch_missing.items():
+                merged = all_missing.setdefault(key, {"text": info["text"], "files": []})
+                for name in info["files"]:
+                    if name not in merged["files"]:
+                        merged["files"].append(name)
     finally:
         manifest_run.finish()
 
@@ -410,10 +462,17 @@ def _translate_batch(
     files_per_call: int | None = None,
     manifest_run=None,
     use_cache: bool = True,
+    write_only: bool = False,
+    allow_resume_prompt: bool = True,
 ) -> tuple:
     """Translate one batch, writing each file as soon as its lines are ready.
 
-    Returns (completed, warnings, still_missing_keys).
+    With write_only, nothing is sent to the API: files are assembled from cached
+    lines alone and anything still missing is left in the source language. Used
+    by the passthrough option after a job ends with lines missing.
+
+    Returns (completed, warnings, still_missing), where still_missing maps a
+    representative key to {"text": source line, "files": [output names]}.
     """
 
     def _record_early_failure(status: str, reason: str) -> None:
@@ -440,14 +499,14 @@ def _translate_batch(
     if stats["total"] == 0:
         log.warning("No dialogue cues found in this batch.")
         _record_early_failure("no_dialogue", "No dialogue cues matched the selected styles")
-        return [], [], set()
+        return [], [], {}
 
     max_blob = cfg.get("MAX_BLOB_LINES", 50000)
     if stats["total"] > max_blob:
         log.error(f"Too many cues ({stats['total']} > {max_blob}). Reduce FILES_PER_BATCH.")
         reason = f"Batch exceeded MAX_BLOB_LINES ({stats['total']} > {max_blob})"
         _record_early_failure("failed", reason)
-        return [], [reason], set()
+        return [], [reason], {}
 
     log.info(f"DEDUP: {stats['total']} total → {stats['unique']} unique "
              f"({stats['collapsed']} collapsed, ~{stats['pct']}% fewer tokens)")
@@ -461,20 +520,43 @@ def _translate_batch(
         from .cache import TranslationCache, series_root_for
         cache = TranslationCache(series_root_for(files), target_lang)
         cached_hits, to_translate = cache.split(payload)
-        if cached_hits:
+
+        # Offer to resume. Asked once per run, and never during a retry or
+        # passthrough pass, which are already an answer to this question.
+        declined = False
+        if cached_hits and allow_resume_prompt and not write_only:
+            if not _ask_resume(len(cached_hits), len(to_translate), cache.path):
+                declined = True
+                cached_hits, to_translate = {}, payload
+
+        # Always say something about the cache, so it is never a mystery
+        # whether resuming is in effect.
+        if declined:
+            log.info(f"CACHE: {cache.loaded} cached line(s) ignored by choice; "
+                     f"translating all {len(to_translate)} line(s) fresh")
+        elif cached_hits:
             log.info(f"CACHE: {len(cached_hits)} line(s) already translated, "
                      f"{len(to_translate)} still to translate")
             log.detail(f"  Cache file: {cache.path}")
         elif cache.loaded:
-            log.detail(f"  Cache has {cache.loaded} entry(ies), none matched this batch")
+            log.info(f"CACHE: {cache.loaded} entry(ies) on file, none match this "
+                     f"batch; {len(to_translate)} line(s) to translate")
+        else:
+            log.info(f"CACHE: empty so far; {len(to_translate)} line(s) to "
+                     f"translate, cached as they complete")
+    elif not use_cache:
+        log.info("CACHE: disabled (--no-cache), translating every line")
 
-    if not to_translate:
+    if write_only:
+        log.info(f"PASSTHROUGH: writing from cache only, {len(to_translate)} "
+                 f"line(s) will stay in {source_lang}. No API calls.")
+    elif not to_translate:
         log.success("Every line was already translated - nothing to send to the API")
 
     # Phase 2: Split into line chunks or explicit whole-file calls.
     log.sep()
     log.phase("PHASE 2 - Splitting into chunks...")
-    if not to_translate:
+    if write_only or not to_translate:
         chunks = []
         log.info("No chunks needed")
     elif files_per_call:
@@ -623,15 +705,25 @@ def _translate_batch(
     # Files still short a few lines are written anyway, up to the configured
     # tolerance, with those lines left in the source language and reported so a
     # later resume can finish them.
-    tolerance = max(0, cfg.get("PARTIAL_LINE_TOLERANCE", 10))
-    still_missing: set = set()
+    # Passthrough deliberately ignores the tolerance: the point is to write every
+    # file, however many lines are left in the source language.
+    tolerance = (len(payload) if write_only
+                 else max(0, cfg.get("PARTIAL_LINE_TOLERANCE", 10)))
+    # rep key -> {"text": source line, "files": which outputs still need it}.
+    # Carrying the text means the missing lines can be listed for review rather
+    # than only counted.
+    still_missing: dict = {}
 
     for file_idx in range(1, len(files) + 1):
         if file_idx in emitted:
             continue
         source = Path(files[file_idx - 1])
         missing_keys = required_by_file[file_idx] - set(translated_unique)
-        still_missing |= missing_keys
+        for key in missing_keys:
+            entry = still_missing.setdefault(
+                key, {"text": payload.get(key, ""), "files": []})
+            if source.name not in entry["files"]:
+                entry["files"].append(source.name)
 
         if missing_keys and len(missing_keys) <= tolerance:
             log.info(f"  {source.name}: {len(missing_keys)} line(s) missing "

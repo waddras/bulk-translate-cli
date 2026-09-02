@@ -65,6 +65,12 @@ RESUME AND THE TRANSLATION CACHE (.btcli-cache.json)
   finish, not 500. Keyed by source text, so renaming files, reordering cues, or
   re-extracting a track cannot corrupt it. Use --no-cache to translate fresh.
 
+  When a cache is found you are asked once per run whether to resume or start
+  over, and the cache state is always reported in Phase 1 so it is never a
+  mystery whether resuming is in effect. Set RESUME_PROMPT false to always
+  resume without asking; the question is skipped automatically when not run
+  from a terminal.
+
   Seasons of one series share the cache, so repeated lines (openings, endings,
   catchphrases) are only ever translated once.
 
@@ -74,14 +80,27 @@ PARTIAL FILES
   Missing more than that and the file is skipped instead. Either way the lines
   are recorded, and a later run finishes the file and rewrites it complete.
 
-RETRY WHEN LINES ARE MISSING
+WHEN LINES ARE MISSING
   If any lines are still missing when a job ends, btcli reports them once,
-  after every folder, and offers to retry immediately at a smaller chunk size
-  (50% by default, or any percentage or line count). One oversized request that
-  fails takes down every line in it, scattering damage across many files, so
-  smaller chunks recover far more. The retry only sends missing lines and loops
-  until it succeeds or you decline. The chunk size you pick applies to that
-  session only and is never written to settings.conf.
+  after every folder, and offers four choices:
+
+    [Y] retry   re-send only the missing lines, at a smaller chunk size
+                (50% by default, or any percentage or line count). One oversized
+                request that fails takes down every line in it, scattering
+                damage across many files, so smaller chunks recover far more.
+                The chunk size applies to that session only and is never
+                written to settings.conf.
+    [s] show    list the untranslated lines, grouped by folder, so you can see
+                whether they are worth another attempt. Returns to this menu.
+    [p] passthrough
+                write the files now with those lines left in the source
+                language. Makes NO API calls: the files are assembled from
+                cached lines. A later run finishes them and rewrites them
+                complete.
+    [n] nothing lines stay cached for a later run
+
+  Retrying loops until it succeeds or you choose otherwise. If a retry recovers
+  nothing you are returned to this menu rather than left stuck.
 
 JOB MANIFEST (.btcli.json)
   Each media directory gets a hidden .btcli.json recording every btcli run as
@@ -192,8 +211,9 @@ RESUME, PARTIAL FILES, AND RETRY
 
   Files missing 10 lines or fewer (PARTIAL_LINE_TOLERANCE) are written with
   those lines left in the source language and reported; more than that and the
-  file is skipped. When the job ends with lines missing, btcli offers to retry
-  them at a smaller chunk size.
+  file is skipped. When the job ends with lines missing you can retry at a
+  smaller chunk size, list the untranslated lines to judge them, or write the
+  files anyway with those lines left as-is.
 
 EXAMPLES
   btcli translate -p "/media/anime/Show" --auto
@@ -275,9 +295,11 @@ WHAT IT ASKS
   6. files per API call? (default auto)
   7. a summary, then Proceed? [Y/n]
 
-  When every folder has finished, any lines still missing are reported once and
-  you are offered a retry at a smaller chunk size. Translated lines are already
-  cached, so the retry only sends what is missing.
+  When every folder has finished, any lines still missing are reported once,
+  with the choice to retry at a smaller chunk size, list the untranslated lines,
+  write the files anyway with those lines left in the source language, or leave
+  them cached. Translated lines are already cached, so a retry only sends what
+  is missing.
 
   Each folder keeps its OWN track and style choice, so a series whose seasons
   differ is handled in one pass.

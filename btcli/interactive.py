@@ -31,9 +31,13 @@ from .prompts import (
     ask_choice as _ask_choice,
     ask_optional_int as _ask_optional_int,
     ask_yes_no as _ask_yes_no,
+    bad as _bad,
     columns as _columns,
+    good as _good,
     header as _header,
+    hint as _hint,
     is_interactive,
+    warn as _warn,
 )
 
 DEFAULT_STYLE_SELECTION = "ALL,+karaoke"
@@ -80,25 +84,27 @@ def _ask_folders(entries: list) -> list:
     if len(entries) == 1:
         return entries
 
+    from .prompts import ITEM, paint
     print("\nFolders found:")
     for number, (directory, files) in enumerate(entries, 1):
-        print(f"  {number}) {directory.name or directory}   ({len(files)} file(s))")
-    print("  Examples:")
-    print("    ALL       every folder")
-    print("    1,3       only folders 1 and 3")
-    print("    -3        every folder except 3")
+        label = paint(f"  {number})", ITEM)
+        print(f"{label} {directory.name or directory}   ({len(files)} file(s))")
+    _hint("  Examples:")
+    _hint("    ALL       every folder")
+    _hint("    1,3       only folders 1 and 3")
+    _hint("    -3        every folder except 3")
 
     while True:
         raw = _ask("  Folders to translate", "ALL")
         try:
             chosen = _resolve_folder_selection(raw, len(entries))
         except ValueError as exc:
-            print(f"  {exc}")
+            _bad(f"  {exc}")
             continue
         skipped = [entries[i - 1][0].name or entries[i - 1][0]
                    for i in range(1, len(entries) + 1) if i not in chosen]
         if skipped:
-            print(f"  Skipping: {', '.join(str(s) for s in skipped)}")
+            _warn(f"  Skipping: {', '.join(str(s) for s in skipped)}")
         return [entries[i - 1] for i in chosen]
 
 
@@ -129,15 +135,15 @@ def _ask_track(tracks: list, bitmap_codecs: set) -> int | None:
     while True:
         answer = _ask("  Track to translate", default)
         if not answer.isdigit():
-            print("  Enter a track number from the list above")
+            _bad("  Enter a track number from the list above")
             continue
         chosen = int(answer)
         if chosen in valid:
             return chosen
         if any(t["index"] == chosen for t in tracks):
-            print("  That track is a bitmap image track and cannot be translated")
+            _bad("  That track is a bitmap image track and cannot be translated")
         else:
-            print("  No such track number")
+            _bad("  No such track number")
 
 
 # ── Style selection ───────────────────────────────────────────────────────────
@@ -191,19 +197,19 @@ def _ask_styles(styles: list, where: str) -> tuple:
 
     print(f"  Styles in {where}:")
     _columns([f"{i}) {name}" for i, name in enumerate(styles, 1)])
-    print("  Examples:")
-    print("    +ALL,1          passthrough all styles, translate only 1")
-    print("    1,2,+karaoke    translate 1 and 2, passthrough karaoke")
-    print("    ALL,+karaoke    translate all styles, passthrough karaoke")
-    print("    1,3,+ALL        translate 1 and 3, passthrough the rest")
-    print("    +3              passthrough style 3")
+    _hint("  Examples:")
+    _hint("    +ALL,1          passthrough all styles, translate only 1")
+    _hint("    1,2,+karaoke    translate 1 and 2, passthrough karaoke")
+    _hint("    ALL,+karaoke    translate all styles, passthrough karaoke")
+    _hint("    1,3,+ALL        translate 1 and 3, passthrough the rest")
+    _hint("    +3              passthrough style 3")
 
     while True:
         raw = _ask("  Styles", DEFAULT_STYLE_SELECTION)
         try:
             tokens = _resolve_style_tokens(raw, styles)
         except ValueError as exc:
-            print(f"  {exc}")
+            _bad(f"  {exc}")
             continue
         keep, passthrough = parse_styles_arg(",".join(tokens))
         return ",".join(tokens), keep, passthrough
@@ -259,7 +265,7 @@ def _plan_video_directory(directory: Path, videos: list) -> dict | None:
     try:
         tracks = probe_tracks(str(sample))
     except Exception as exc:
-        print(f"  Could not probe this file: {exc}")
+        _bad(f"  Could not probe this file: {exc}")
         tracks = []
 
     track_index = None
@@ -271,17 +277,17 @@ def _plan_video_directory(directory: Path, videos: list) -> dict | None:
         # Fall back to external subtitle files sitting next to the videos.
         subtitles = _subtitle_files_in(directory)
         if not subtitles:
-            print("  No usable subtitle tracks and no subtitle files here - skipping")
+            _warn("  No usable subtitle tracks and no subtitle files here - skipping")
             return None
-        print(f"  No subtitle tracks found, but {len(subtitles)} subtitle file(s) are here.")
+        _warn(f"  No subtitle tracks found, but {len(subtitles)} subtitle file(s) are here.")
         if not _ask_yes_no("  Use those subtitle files instead?", True):
-            print("  Skipping this folder")
+            _warn("  Skipping this folder")
             return None
         return _plan_subtitle_directory(directory, subtitles)
 
     styles = _styles_from_video(sample, track_index)
     if not styles:
-        print("  This track has no ASS styles (plain text) - all lines will be translated")
+        _hint("  This track has no ASS styles (plain text) - all lines will be translated")
         return {"dir": directory, "mode": "vid", "files": videos, "track": track_index,
                 "styles_raw": "(no styles)", "keep": None, "passthrough": None}
 
@@ -299,7 +305,7 @@ def _plan_subtitle_directory(directory: Path, subtitles: list) -> dict | None:
 
     styles = get_styles_from_file(sample) if sample.suffix.lower() in (".ass", ".ssa") else []
     if not styles:
-        print(f"  {len(subtitles)} file(s), no ASS styles - all lines will be translated")
+        _hint(f"  {len(subtitles)} file(s), no ASS styles - all lines will be translated")
         return {"dir": directory, "mode": "sub", "files": subtitles, "track": None,
                 "styles_raw": "(no styles)", "keep": None, "passthrough": None}
 
@@ -311,18 +317,19 @@ def _plan_subtitle_directory(directory: Path, subtitles: list) -> dict | None:
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 def _print_summary(plans: list, force: bool, files_per_call, suffix: str) -> None:
+    from .prompts import HEADING, ITEM, paint
     _header(f"PLAN - {len(plans)} folder(s)")
     for plan in plans:
         track = "n/a" if plan["track"] is None else str(plan["track"])
-        print(f"  {plan['dir'].name or plan['dir']}")
-        print(f"    files:  {len(plan['files'])} ({plan['mode']})")
-        print(f"    track:  {track}")
+        print("  " + paint(str(plan["dir"].name or plan["dir"]), ITEM))
+        _hint(f"    files:  {len(plan['files'])} ({plan['mode']})")
+        _hint(f"    track:  {track}")
         print(f"    styles: {plan['styles_raw']}")
     print()
-    print(f"  Output suffix:      {suffix}")
-    print(f"  Force re-extract:   {'yes' if force else 'no'}")
-    print(f"  Files per API call: {files_per_call if files_per_call else 'auto'}")
-    print("=" * 60)
+    _hint(f"  Output suffix:      {suffix}")
+    _hint(f"  Force re-extract:   {'yes' if force else 'no'}")
+    _hint(f"  Files per API call: {files_per_call if files_per_call else 'auto'}")
+    print(paint("=" * 60, HEADING))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

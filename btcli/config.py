@@ -52,6 +52,7 @@ DEFAULT_SETTINGS = {
     "MAX_FAILED_CHUNKS": 5,
     "USE_TRANSLATION_CACHE": True,
     "PARTIAL_LINE_TOLERANCE": 10,
+    "RESUME_PROMPT": True,
 
     # Language
     "SOURCE_LANGUAGE": "english",
