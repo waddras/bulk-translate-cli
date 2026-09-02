@@ -435,19 +435,37 @@ UPDATE_EPILOG = """\
 Update the installed copy of btcli.
 
 WHAT IT DOES
-  1. git pull in the install directory (/opt/btcli)
+  1. fetch origin, then fast-forward the current branch
   2. create settings.conf from settings.default.conf if you have none
   3. merge any NEW settings keys into your existing settings.conf,
      preserving your values and comments, and list deprecated keys
 
 Your settings.conf is never overwritten; only missing keys are added.
 
-REQUIREMENTS
-  The install directory must be a clean git checkout. If you have local edits
-  git pull will refuse — stash or discard them first.
+FAST-FORWARD ONLY
+  btcli never creates a merge commit in your install. If your checkout has
+  local commits the remote does not, the update stops and tells you how to
+  rebase manually. Nothing is rewritten behind your back.
+
+LOCAL EDITS
+  Uncommitted edits to tracked files block the update, because a fast-forward
+  would clobber them. Either pass --stash (btcli sets them aside and puts them
+  back afterwards) or discard them yourself.
+
+  Untracked files never block anything, and settings.conf plus the runtime
+  state files (.btcli.json, .btcli-cache.json) are gitignored, so your config
+  and resume data always survive an update.
+
+OPTIONS
+  --check          report what an update would do, change nothing
+  --branch NAME    switch to NAME and update that instead of the current branch
+  --stash          set local edits aside, update, then restore them
 
 EXAMPLES
-  btcli update
+  btcli update                      # update the current branch
+  btcli update --check              # is there anything new?
+  btcli update --branch main        # move back to the release branch
+  btcli update --stash              # update despite local edits
   btcli --verbose update
 """
 
@@ -598,7 +616,7 @@ def _parse_args():
                          help="Cache language to trim. Default: TARGET_LANGUAGE from settings")
 
     # ── update ────────────────────────────────────────────────────────────────
-    sub.add_parser(
+    p_update = sub.add_parser(
         "update",
         help="Pull the latest code and merge any new settings keys",
         description="Update the installed copy of btcli and add new settings keys to "
@@ -606,6 +624,12 @@ def _parse_args():
         epilog=UPDATE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p_update.add_argument("--check", action="store_true",
+                          help="Report what an update would do, then stop. Changes nothing")
+    p_update.add_argument("--branch", default=None, metavar="NAME",
+                          help="Switch to NAME and update it. Default: the current branch")
+    p_update.add_argument("--stash", action="store_true",
+                          help="Set uncommitted edits aside, update, then restore them")
 
     return parser.parse_args()
 
@@ -648,16 +672,21 @@ def main():
         print("  probe        Inspect subtitle tracks, styles, and tags (no API calls)")
         print("  translate    Translate subtitle files or video subtitle tracks")
         print("  fix          Repair already-translated files (no API calls)")
+        print("  prune        Report and reclaim stale cache and job records")
         print("  update       Pull latest code + merge new settings\n")
         print("Common usage:")
-        print("  btcli interactive [-p PATH]")
+        print("  btcli interactive [-p PATH] [--dry-run]")
         print("  btcli probe -p PATH [-i vid|sub] [-m sample|recursive] [-f FILTER] [-o tracks,styles,tags]")
         print("  btcli translate -p PATH [-l LANG] [-i vid|sub] [-f FILTER] [-t TRACKS]")
         print("                  [-s STYLES] [-suffix .ar] [-o srt] [--show-name NAME]")
         print("                  [--auto] [--force] [--files-per-call N]")
-        print("  btcli fix -p PATH [-f FILTER] [--apply rtl,font,style,linebreak,all] [--backup]")
-        print("  btcli update\n")
+        print("                  [--dry-run] [--no-cache]")
+        print("  btcli fix -p PATH [-f FILTER] [--apply rtl,font,style,linebreak,font-strip,all] [--backup]")
+        print("  btcli prune [-p PATH] [--what cache,jobs,all] [--keep N] [--apply]")
+        print("  btcli update [--check] [--branch NAME] [--stash]\n")
         print("Paths default to the current directory; scanning stops one directory deep.\n")
+        print("See what would happen before spending any API quota:")
+        print("  btcli translate -p PATH --dry-run\n")
         print("Skip karaoke while translating dialogue:")
         print("  btcli translate -p PATH -s \"ALL,+karaoke\"")
         print("  btcli translate -p PATH --auto\n")
@@ -743,7 +772,7 @@ def main():
 
     elif args.command == "update":
         from .update import run_update
-        run_update()
+        run_update(branch=args.branch, check=args.check, stash=args.stash)
 
     log.close()
 

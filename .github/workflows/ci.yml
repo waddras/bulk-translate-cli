@@ -41,3 +41,25 @@ jobs:
             python -m btcli "$command" -h > /dev/null
           done
           python -m btcli -h > /dev/null
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Install it clean and check the entry point works
+        run: |
+          python -m venv /tmp/check
+          /tmp/check/bin/pip install dist/*.whl
+          /tmp/check/bin/btcli --version
+          /tmp/check/bin/btcli --help > /dev/null

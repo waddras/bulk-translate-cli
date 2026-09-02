@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bulk-translate-cli"
+dynamic = ["version"]
+description = "Bulk subtitle translation CLI — translate SRT/ASS subtitles and embedded subtitle tracks with the Gemini API"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "waddras" }]
+keywords = ["subtitles", "translation", "srt", "ass", "gemini", "arabic"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+dependencies = [
+    "httpx>=0.27.0",
+    "pysubs2>=1.7.0",
+    "json-repair>=0.28.0",
+    "fonttools>=4.50.0",
+    "rich>=13.7.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4.0"]
+
+[project.scripts]
+btcli = "btcli.main:main"
+
+[tool.setuptools]
+packages = ["btcli"]
+
+[tool.setuptools.dynamic]
+version = { attr = "btcli.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
