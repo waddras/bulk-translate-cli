@@ -320,16 +320,45 @@ def _generation_config() -> dict:
 
 # ── Model Pool ────────────────────────────────────────────────────────────────
 
-def _get_model_for_attempt(attempt: int) -> str:
-    """Cycle through MODEL_POOL on retries."""
-    pool = cfg.get("MODEL_POOL", [])
+def model_ladder() -> list:
+    """Every distinct model to try, in order, primary first.
+
+    GEMINI_MODEL is merged with MODEL_POOL and duplicates are dropped, so a pool
+    that repeats the primary (the shipped default does) cannot waste a retry on
+    the model that just failed.
+    """
     primary = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
-    if not pool:
-        return primary
-    if attempt <= 1:
-        return primary
-    idx = (attempt - 2) % len(pool)
-    return pool[idx]
+    pool = cfg.get("MODEL_POOL", []) or []
+    ladder = []
+    for model in [primary] + list(pool):
+        if model and model not in ladder:
+            ladder.append(model)
+    return ladder or [primary]
+
+
+def effective_attempts() -> int:
+    """Attempts per chunk: never fewer than the number of distinct models.
+
+    This guarantees every model in the ladder is tried before a chunk is given
+    up on, whatever RETRY_ATTEMPTS is set to.
+    """
+    return max(int(cfg.get("RETRY_ATTEMPTS", 5) or 1), len(model_ladder()))
+
+
+def _get_model_for_attempt(attempt: int) -> str:
+    """Model for a 1-based attempt number, walking the ladder then wrapping."""
+    ladder = model_ladder()
+    return ladder[(attempt - 1) % len(ladder)]
+
+
+def _switching_model(attempt: int) -> bool:
+    """True when the next attempt uses a different model than this one.
+
+    Backing off is only useful when the same model is about to be retried;
+    moving to a different model should happen immediately.
+    """
+    ladder = model_ladder()
+    return len(ladder) > 1 and attempt < len(ladder)
 
 
 # ── Core API Call ─────────────────────────────────────────────────────────────
@@ -390,15 +419,20 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
     failures: list = []
 
     async def _translate_one(chunk, chunk_num):
-        """Translate a single chunk with retries."""
+        """Translate a single chunk, trying every model before giving up."""
         est = estimate_output_tokens(chunk)
-        model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
-        log.chunk_status(chunk_num, total, len(chunk), est, model)
+        ladder = model_ladder()
+        attempts = effective_attempts()
+        log.chunk_status(chunk_num, total, len(chunk), est,
+                         f"{ladder[0]} (+{len(ladder) - 1} fallback)"
+                         if len(ladder) > 1 else ladder[0])
 
         prompt = _build_prompt(chunk, show_name, source_lang, target_lang)
 
-        for attempt in range(1, retry_attempts + 1):
-            result = await _call_gemini(client, prompt, api_key, attempt=attempt)
+        for attempt in range(1, attempts + 1):
+            model = _get_model_for_attempt(attempt)
+            log.detail(f"    Attempt {attempt}/{attempts} - model: {model}")
+            result = await _call_gemini(client, prompt, api_key, model=model, attempt=attempt)
             if result:
                 normalized = _normalize_result(result, chunk)
                 if normalized:
@@ -407,17 +441,21 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
                     log.chunk_success(chunk_num, len(normalized))
                     log.advance_progress()
                     return normalized
-                log.attempt(attempt, retry_attempts, "response failed ID validation")
+                log.attempt(attempt, attempts, f"{model}: response failed ID validation")
             else:
-                log.attempt(attempt, retry_attempts, "failed")
-            if attempt < retry_attempts:
-                await asyncio.sleep(retry_cooldown * attempt)
+                log.attempt(attempt, attempts, f"{model}: failed")
+            if attempt < attempts:
+                # Switch model immediately; only back off once every model has
+                # been tried and the ladder starts repeating.
+                if not _switching_model(attempt):
+                    await asyncio.sleep(retry_cooldown * attempt)
 
         # A failed chunk is deliberately NOT counted as progress: completing the
         # bar stops its elapsed clock, which reads as a frozen display while
         # retries are still running.
         failures.append(chunk_num)
-        log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
+        log.chunk_fail(chunk_num, f"after {attempts} attempts across "
+                                  f"{len(ladder)} model(s)")
         log.update_progress(description=f"Translating ({len(failures)} failed)")
         return None
 
@@ -457,10 +495,10 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
     import json_repair
 
     translated = {}
-    model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
     gen_cfg = _generation_config()
-    retry_attempts = cfg.get("RETRY_ATTEMPTS", 5)
     retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
+    ladder = model_ladder()
+    attempts = effective_attempts()
     failures: list = []
 
     context_text = (
@@ -476,7 +514,9 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
 
     for chunk_num, chunk in enumerate(chunks, 1):
         est = estimate_output_tokens(chunk)
-        log.chunk_status(chunk_num, len(chunks), len(chunk), est, model)
+        log.chunk_status(chunk_num, len(chunks), len(chunk), est,
+                         f"{ladder[0]} (+{len(ladder) - 1} fallback)"
+                         if len(ladder) > 1 else ladder[0])
 
         keys_to_translate = list(chunk.keys())
         turn_text = (
@@ -487,9 +527,11 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
         )
 
         current_contents = contents + [{"role": "user", "parts": [{"text": turn_text}]}]
-        url = f"{GEMINI_BASE}/{model}:generateContent"
 
-        for attempt in range(1, retry_attempts + 1):
+        for attempt in range(1, attempts + 1):
+            model = _get_model_for_attempt(attempt)
+            url = f"{GEMINI_BASE}/{model}:generateContent"
+            log.detail(f"    Attempt {attempt}/{attempts} - model: {model}")
             try:
                 await _enforce_cooldown()
                 response = await client.post(
@@ -499,8 +541,10 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                     timeout=300.0,
                 )
                 if response.status_code == 429:
-                    log.attempt(attempt, retry_attempts, "rate limited")
-                    if attempt < retry_attempts:
+                    # Rate limited: move to the next model at once rather than
+                    # waiting on a model that is already out of quota.
+                    log.attempt(attempt, attempts, f"{model}: rate limited")
+                    if attempt < attempts and not _switching_model(attempt):
                         await asyncio.sleep(retry_cooldown * attempt)
                     continue
                 response.raise_for_status()
@@ -517,12 +561,13 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                 log.advance_progress()
                 break
             except Exception as e:
-                log.attempt(attempt, retry_attempts, str(e))
-                if attempt < retry_attempts:
+                log.attempt(attempt, attempts, f"{model}: {e}")
+                if attempt < attempts and not _switching_model(attempt):
                     await asyncio.sleep(retry_cooldown)
         else:
             failures.append(chunk_num)
-            log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
+            log.chunk_fail(chunk_num, f"after {attempts} attempts across "
+                                      f"{len(ladder)} model(s)")
             log.update_progress(description=f"Translating ({len(failures)} failed)")
 
     return translated
@@ -551,14 +596,19 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
             await asyncio.sleep(cooldown)
 
         est = estimate_output_tokens(chunk)
-        model = cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
-        log.chunk_status(chunk_num, len(chunks), len(chunk), est, f"{model} (full context)")
+        ladder = model_ladder()
+        attempts = effective_attempts()
+        log.chunk_status(chunk_num, len(chunks), len(chunk), est,
+                         f"{ladder[0]} (+{len(ladder) - 1} fallback, full context)"
+                         if len(ladder) > 1 else f"{ladder[0]} (full context)")
 
         keys = list(chunk.keys())
         prompt = _build_full_context_prompt(keys, full_payload, show_name, source_lang, target_lang)
 
-        for attempt in range(1, retry_attempts + 1):
-            result = await _call_gemini(client, prompt, api_key, attempt=attempt)
+        for attempt in range(1, attempts + 1):
+            model = _get_model_for_attempt(attempt)
+            log.detail(f"    Attempt {attempt}/{attempts} - model: {model}")
+            result = await _call_gemini(client, prompt, api_key, model=model, attempt=attempt)
             if result:
                 expected = {key: full_payload[key] for key in keys}
                 normalized = _normalize_result(result, expected)
@@ -568,16 +618,17 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
                     _notify_progress(progress_callback, translated)
                     log.advance_progress()
                     break
-                log.attempt(attempt, retry_attempts, "response failed ID validation")
-                if attempt < retry_attempts:
+                log.attempt(attempt, attempts, f"{model}: response failed ID validation")
+                if attempt < attempts and not _switching_model(attempt):
                     await asyncio.sleep(retry_cooldown * attempt)
             else:
-                log.attempt(attempt, retry_attempts, "failed")
-                if attempt < retry_attempts:
+                log.attempt(attempt, attempts, f"{model}: failed")
+                if attempt < attempts and not _switching_model(attempt):
                     await asyncio.sleep(retry_cooldown * attempt)
         else:
             failures.append(chunk_num)
-            log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
+            log.chunk_fail(chunk_num, f"after {attempts} attempts across "
+                                      f"{len(ladder)} model(s)")
             log.update_progress(description=f"Translating ({len(failures)} failed)")
 
     return translated
@@ -648,18 +699,24 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
         # showed no movement at all.
         log.start_progress(f"Retry round {retry_round}/{max_retries}", total=len(batches))
 
+        ladder = model_ladder()
+        attempts = effective_attempts()
+
         for batch_num, batch in enumerate(batches, 1):
-            model = _get_model_for_attempt(retry_round + 1)
             log.detail(f"  RETRY {batch_num}/{len(batches)} - "
-                       f"{len(batch['translate_keys'])} lines - model: {model}")
+                       f"{len(batch['translate_keys'])} lines - "
+                       f"{len(ladder)} model(s) available")
 
             prompt = _build_retry_prompt(
                 batch["translate_keys"], batch["context"],
                 show_name, source_lang, target_lang
             )
 
-            retry_attempts = cfg.get("RETRY_ATTEMPTS", 5)
-            for attempt in range(1, retry_attempts + 1):
+            # Start this round at a different point in the ladder so later rounds
+            # do not open with the model that already failed.
+            for attempt in range(1, attempts + 1):
+                model = _get_model_for_attempt(attempt + retry_round - 1)
+                log.detail(f"    Attempt {attempt}/{attempts} - model: {model}")
                 result = await _call_gemini(client, prompt, api_key, model=model, attempt=attempt)
                 if result:
                     expected = {key: full_payload[key] for key in batch["translate_keys"]}
@@ -671,10 +728,10 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
                         if recovered_callback:
                             recovered_callback(normalized)
                         break
-                    log.attempt(attempt, retry_attempts, "response failed ID validation")
+                    log.attempt(attempt, attempts, f"{model}: response failed ID validation")
                 else:
-                    log.attempt(attempt, retry_attempts, "retry failed")
-                if attempt < retry_attempts:
+                    log.attempt(attempt, attempts, f"{model}: retry failed")
+                if attempt < attempts and not _switching_model(attempt):
                     await asyncio.sleep(retry_cooldown)
 
             log.advance_progress()

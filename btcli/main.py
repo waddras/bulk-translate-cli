@@ -93,9 +93,20 @@ JOB MANIFEST (.btcli.json)
   source. Use --force to ignore the manifest and re-extract.
 
 RATE LIMITS AND MODELS
-  GEMINI_MODEL is tried first; MODEL_POOL is the retry ladder. Put your
-  highest-quota models first: a model with 500 requests/day survives a long
-  job, one with 20/day will start returning 429 partway through.
+  GEMINI_MODEL is tried first, then every model in MODEL_POOL. The two are
+  merged and de-duplicated into one ladder, so a pool that repeats the primary
+  never wastes a retry on the model that just failed.
+
+  EVERY model in the ladder is tried before a chunk is given up on. If
+  RETRY_ATTEMPTS is lower than the number of models it is raised automatically,
+  so no model is ever skipped. Set it higher to allow more passes.
+
+  A failure moves to the next model immediately; the cooldown only applies once
+  every model has been tried and the ladder starts repeating. A 429 therefore
+  switches model at once instead of waiting on a model that is out of quota.
+
+  Order the pool by quota: a model with 500 requests/day survives a long job,
+  one with 20/day will start returning 429 partway through.
 
 FONTS
   With EMBED_FONT true, an Arabic font subset is embedded into ASS output so
