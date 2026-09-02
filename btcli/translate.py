@@ -17,19 +17,17 @@ from collections import Counter
 from pathlib import Path
 
 from .ai import run_translation
+from .batch import BatchWriter
 from .blob import (
     build_blob,
-    expand_translations,
     estimate_output_tokens,
     split_blob,
     split_blob_by_files,
 )
-from .config import cfg, get_lang_code, get_suffix_for_lang
+from .config import cfg, get_suffix_for_lang
 from .discover import discover_files, exclude_translated_output
 from .extract import extract_from_videos
 from .logger import log
-from .srt_pre import parse_subtitle_file
-from .sub_post import reassemble_files
 
 
 # ── Auto Style Detection ──────────────────────────────────────────────────────
@@ -578,94 +576,13 @@ def _translate_batch(
     mode = cfg.get("TRANSLATION_MODE", "chunked")
     log.stat("Translation mode", mode)
 
-    # Build per-file completion requirements. A file is safe to write only when
-    # every representative key needed by all of its cues has a translation.
-    cues_by_file = {index: [] for index in range(1, len(files) + 1)}
-    for tag, item in meta.items():
-        cues_by_file[item["file_idx"]].append((tag, item))
-    required_by_file = {
-        index: {item["rep"] for _, item in cues}
-        for index, cues in cues_by_file.items()
-    }
-    chunk_keys = [set(chunk) for chunk in chunks]
-    emitted = set()
-    completed = []
-    warnings = []
-
-    def _translation_details(file_idx: int, translated: dict, status: str,
-                             output: str | None = None) -> dict:
-        cues = cues_by_file[file_idx]
-        required = required_by_file[file_idx]
-        translated_cues = sum(1 for _, item in cues if item["rep"] in translated)
-        file_chunk_sizes = [len(required & keys) for keys in chunk_keys]
-        return {
-            "output": output,
-            "source_language": source_lang,
-            "target_language": target_lang,
-            "suffix": suffix,
-            "model": cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
-            "model_pool": cfg.get("MODEL_POOL", []),
-            "mode": mode,
-            "files_per_call": files_per_call,
-            "max_lines_per_chunk": None if files_per_call else cfg.get("MAX_LINES_PER_CHUNK", 1000),
-            "batch_chunk_sizes": [len(chunk) for chunk in chunks],
-            "file_lines_per_chunk": [size for size in file_chunk_sizes if size],
-            "cues": len(cues),
-            "unique_lines": len(required),
-            "deduplicated_lines": len(cues) - len(required),
-            "translated": translated_cues,
-            "total": len(cues),
-            "missing_unique": len(required - set(translated)),
-            "styles_to_translate": keep_styles or [],
-            "passthrough_styles": passthrough_styles or [],
-            "status": status,
-            "elapsed": log.elapsed(),
-        }
-
-    def _emit(file_idx: int, translated: dict, status: str,
-              missing_keys: set | None = None) -> bool:
-        """Write one output file and record it. Returns True when written."""
-        source = Path(files[file_idx - 1])
-        try:
-            translated_blob = expand_translations(translated, meta)
-            written, file_warnings = reassemble_files(
-                translated_blob, meta, files,
-                suffix=suffix, force_srt=force_srt,
-                kept_styles=keep_styles, passthrough_styles=passthrough_styles,
-                only_file_indices={file_idx},
-            )
-        except Exception as exc:
-            log.detail(f"    Could not write {source.name}: {exc}")
-            return False
-
-        if not written:
-            return False
-
-        emitted.add(file_idx)
-        completed.extend(written)
-        warnings.extend(file_warnings)
-
-        if manifest_run:
-            details = _translation_details(file_idx, translated, status, written[0])
-            if missing_keys:
-                details["untranslated_lines"] = [
-                    payload[key] for key in sorted(missing_keys) if key in payload
-                ][:50]
-            manifest_run.record_translation(source, details)
-        return True
-
-    def _write_ready_files(translated: dict) -> None:
-        """Write every file whose lines are now all translated."""
-        translated_keys = set(translated)
-        for file_idx in range(1, len(files) + 1):
-            if file_idx in emitted:
-                continue
-            required = required_by_file[file_idx]
-            if not required or not required.issubset(translated_keys):
-                continue
-            source = Path(files[file_idx - 1])
-            log.info(f"  All lines ready: {source.name} — generating output now")
-            _emit(file_idx, translated, "complete")
+    writer = BatchWriter(
+        files, meta, payload, chunks,
+        suffix=suffix, force_srt=force_srt,
+        keep_styles=keep_styles, passthrough_styles=passthrough_styles,
+        source_lang=source_lang, target_lang=target_lang,
+        mode=mode, files_per_call=files_per_call, manifest_run=manifest_run,
+    )
 
     # Phase 3: Translate. After each response the new lines are written to the
     # cache first, then any file that is now complete is generated, so an
@@ -673,7 +590,7 @@ def _translate_batch(
     def _on_progress(fresh: dict) -> None:
         if cache is not None:
             cache.store_and_flush(to_translate, fresh)
-        _write_ready_files({**cached_hits, **fresh})
+        writer.write_ready({**cached_hits, **fresh})
 
     log.sep()
     log.phase("PHASE 3 - Translating and writing completed files...")
@@ -696,64 +613,21 @@ def _translate_batch(
 
     translated_unique = {**cached_hits, **fresh_translations}
 
-    # Final readiness pass and explicit handling for incomplete files. No file
-    # is generated with shifted, missing, or source-language fallback lines.
+    # Phase 4: write or report whatever is left. Passthrough deliberately ignores
+    # the tolerance, since its whole purpose is to write every file regardless of
+    # how many lines are still in the source language.
     log.sep()
     log.phase("PHASE 4 - Finalizing file completion...")
-    _write_ready_files(translated_unique)
-
-    # Files still short a few lines are written anyway, up to the configured
-    # tolerance, with those lines left in the source language and reported so a
-    # later resume can finish them.
-    # Passthrough deliberately ignores the tolerance: the point is to write every
-    # file, however many lines are left in the source language.
     tolerance = (len(payload) if write_only
                  else max(0, cfg.get("PARTIAL_LINE_TOLERANCE", 10)))
-    # rep key -> {"text": source line, "files": which outputs still need it}.
-    # Carrying the text means the missing lines can be listed for review rather
-    # than only counted.
-    still_missing: dict = {}
-
-    for file_idx in range(1, len(files) + 1):
-        if file_idx in emitted:
-            continue
-        source = Path(files[file_idx - 1])
-        missing_keys = required_by_file[file_idx] - set(translated_unique)
-        for key in missing_keys:
-            entry = still_missing.setdefault(
-                key, {"text": payload.get(key, ""), "files": []})
-            if source.name not in entry["files"]:
-                entry["files"].append(source.name)
-
-        if missing_keys and len(missing_keys) <= tolerance:
-            log.info(f"  {source.name}: {len(missing_keys)} line(s) missing "
-                     f"(within tolerance of {tolerance}) — writing anyway")
-            for key in sorted(missing_keys):
-                log.detail(f"      untranslated: {payload.get(key, '')[:80]}")
-            if _emit(file_idx, translated_unique, "partial", missing_keys):
-                message = (f"{source.name}: written with {len(missing_keys)} line(s) "
-                           f"left in {source_lang}")
-                log.warning(message)
-                warnings.append(message)
-                continue
-
-        message = (f"{source.name}: not written because {len(missing_keys)} "
-                   f"unique line(s) remain untranslated")
-        log.warning(message)
-        warnings.append(message)
-        if manifest_run:
-            details = _translation_details(file_idx, translated_unique, "incomplete")
-            details["untranslated_lines"] = [
-                payload[key] for key in sorted(missing_keys) if key in payload
-            ][:50]
-            manifest_run.record_translation(source, details)
+    still_missing = writer.finalize(translated_unique, tolerance)
 
     total_keys = len(payload)
     translated_count = len(set(payload) & set(translated_unique))
     pct = round(translated_count / total_keys * 100) if total_keys else 0
     log.info(f"  Batch: {translated_count}/{total_keys} unique lines ({pct}%)")
-    log.info(f"  Files written: {len(emitted)}/{len(files)}")
+    log.info(f"  Files written: {len(writer.emitted)}/{len(files)}")
     if cache is not None and cache.added:
         log.info(f"  Cached {cache.added} new line(s) for future runs")
 
-    return completed, warnings, still_missing
+    return writer.completed, writer.warnings, still_missing
