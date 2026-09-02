@@ -153,3 +153,49 @@ def test_strict_turns_warnings_into_a_block(isolated_settings):
     isolated_settings["MODEL_POOL"] = ["dup", "dup"]
     isolated_settings["GEMINI_MODEL"] = "dup"
     assert report_settings(strict=True) is False
+
+
+
+# ── the all-clear message ─────────────────────────────────────────────────────
+
+def warned_settings() -> dict:
+    """A config with nothing fatal, but something worth warning about."""
+    settings = dict(SANE)
+    settings["RETRY_ATTEMPTS"] = 1
+    settings["MODEL_POOL"] = ["model-a", "model-b", "model-c"]
+    return settings
+
+
+def all_output(capsys) -> str:
+    captured = capsys.readouterr()
+    return " ".join((captured.out + " " + captured.err).split())
+
+
+def test_clean_config_is_announced_as_good(capsys):
+    """Nothing wrong at all, so the reassurance is warranted."""
+    assert report_settings(SANE, announce_ok=True) is True
+    assert "looks good" in all_output(capsys)
+
+
+def test_a_warned_config_is_not_announced_as_good(capsys):
+    """Saying "looks good" under its own warnings reads as if they did not count.
+
+    This shipped: --check-settings printed two warnings and then declared the
+    file fine, which is how a real user came to ask whether it was fine.
+    """
+    assert report_settings(warned_settings(), announce_ok=True) is True
+    assert "looks good" not in all_output(capsys)
+
+
+def test_a_warned_config_still_says_nothing_is_blocking(capsys):
+    report_settings(warned_settings(), announce_ok=True)
+
+    output = all_output(capsys)
+    assert "No blocking problems" in output
+    assert "--strict" in output, "should point at the way to make them fatal"
+
+
+def test_announce_ok_is_off_by_default(capsys):
+    """A normal run should not congratulate the user on every command."""
+    report_settings(SANE)
+    assert "looks good" not in all_output(capsys)

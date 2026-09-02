@@ -656,9 +656,7 @@ def main():
     if args.check_settings:
         from .config import _settings_file
         log.info(f"Checking {_settings_file or 'built-in defaults'}")
-        ok = report_settings(strict=args.strict)
-        if ok:
-            log.success("settings.conf looks good.")
+        ok = report_settings(strict=args.strict, announce_ok=True)
         sys.exit(0 if ok else 1)
 
     if not report_settings(strict=args.strict):

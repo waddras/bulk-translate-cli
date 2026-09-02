@@ -199,10 +199,16 @@ def check_settings(settings: dict | None = None) -> tuple:
     return errors, warnings
 
 
-def report_settings(settings: dict | None = None, strict: bool = False) -> bool:
+def report_settings(settings: dict | None = None, strict: bool = False,
+                    announce_ok: bool = False) -> bool:
     """Log any problems. Returns False when the job should not start.
 
     Errors always block. Warnings block only when strict is set.
+
+    With announce_ok, also says so when nothing blocks — but distinguishes a
+    clean config from one that merely has nothing fatal. Claiming a config
+    "looks good" directly beneath its own warnings reads as if the warnings did
+    not count.
     """
     from .logger import log
 
@@ -219,4 +225,12 @@ def report_settings(settings: dict | None = None, strict: bool = False) -> bool:
     if warnings and strict:
         log.error("Refusing to continue because of the warnings above (--strict).")
         return False
+
+    if announce_ok:
+        if warnings:
+            log.warning(
+                f"No blocking problems, but {len(warnings)} warning(s) above are "
+                f"worth fixing. --strict treats them as errors.")
+        else:
+            log.success("settings.conf looks good.")
     return True
