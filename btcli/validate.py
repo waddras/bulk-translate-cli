@@ -11,6 +11,10 @@ warning (it will run, but not as intended).
 """
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 from .config import cfg
 
 # Types each setting must have. Numbers accept int only; bools are checked
@@ -185,7 +189,8 @@ def check_settings(settings: dict | None = None) -> tuple:
             warnings.append(
                 "PROMPT_TEMPLATE still asks for a JSON object with the same keys, "
                 "but replies must be a JSON array; the built-in contract overrides "
-                "it, so remove that wording to avoid contradicting the model")
+                "it, so the model is being sent contradictory instructions. Fix "
+                "with: btcli update --reset PROMPT_TEMPLATE")
 
     # ── Extensions ───────────────────────────────────────────────────────────
     for key in ("SOURCE_EXTENSIONS", "MKV_EXTENSIONS"):
@@ -197,6 +202,50 @@ def check_settings(settings: dict | None = None) -> tuple:
                 errors.append(f"{key} entries must start with a dot: {bad}")
 
     return errors, warnings
+
+
+def find_duplicate_keys(raw: str) -> list:
+    """Keys declared more than once in a settings file, in order of appearance.
+
+    JSON keeps the last of a repeated key and reports nothing, so a file can
+    hold two contradictory values for one setting and look fine. Reading it,
+    there is no way to tell which one applies.
+    """
+    cleaned = re.sub(r'(?m)^\s*//.*$', '', raw)
+    cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
+
+    duplicates: list = []
+
+    def collect(pairs):
+        keys = [key for key, _ in pairs]
+        for key in keys:
+            if keys.count(key) > 1 and key not in duplicates:
+                duplicates.append(key)
+        return dict(pairs)
+
+    try:
+        json.loads(cleaned, object_pairs_hook=collect)
+    except ValueError:
+        return []          # unparseable is reported elsewhere
+    return duplicates
+
+
+def _duplicate_key_warnings(path) -> list:
+    """Warn about any setting declared twice in the active settings file."""
+    if path is None:
+        return []
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    warnings = []
+    for key in find_duplicate_keys(raw):
+        warnings.append(
+            f"{key} is declared more than once; JSON keeps only the last value, "
+            f"so the earlier one is silently ignored. Delete the duplicate, or "
+            f"reset it with: btcli update --reset {key}")
+    return warnings
 
 
 def report_settings(settings: dict | None = None, strict: bool = False,
@@ -213,6 +262,12 @@ def report_settings(settings: dict | None = None, strict: bool = False,
     from .logger import log
 
     errors, warnings = check_settings(settings)
+
+    # Duplicates are invisible to check_settings, which only sees the parsed
+    # dict — by then the repeated key has already collapsed to one value.
+    if settings is None:
+        from .config import _settings_file
+        warnings = warnings + _duplicate_key_warnings(_settings_file)
 
     for message in errors:
         log.error(f"settings.conf: {message}")

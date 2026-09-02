@@ -397,6 +397,39 @@ are left alone, and keys btcli no longer uses are reported rather than deleted.
 | `--check` | Report what an update would do, change nothing |
 | `--branch NAME` | Switch to `NAME` and update that |
 | `--stash` | Set uncommitted edits aside, update, then restore them |
+| `--reset KEYS` | Restore the shipped default for these settings |
+| `--dedupe` | Remove repeated settings, keeping the value in effect |
+
+### Repairing a stale settings.conf
+
+Because your values are never overwritten, a setting can go stale — it keeps
+working while no longer matching what the code expects. `--check-settings`
+warns about the cases that matter, and two options fix them without disturbing
+the rest of the file. Both write a `.bak` first, and neither pulls code.
+
+**`--reset KEYS`** restores the shipped default. Use it when a value is simply
+wrong — for example a `PROMPT_TEMPLATE` still demanding a JSON object after the
+code moved to arrays:
+
+```bash
+btcli update --reset PROMPT_TEMPLATE
+btcli update --reset PROMPT_TEMPLATE,STRIP_TAGS
+```
+
+It restores the *default*, so it will discard a value you chose on purpose.
+
+**`--dedupe`** removes repeated declarations of one setting. JSON keeps the last
+of a repeated key and reports nothing, so a file can hold two values for one
+setting and look perfectly fine — with no way to tell by reading which applies.
+Dedupe keeps the one already in effect, so your behaviour does not change; the
+file just stops disagreeing with itself:
+
+```bash
+btcli update --dedupe
+```
+
+Comments, ordering and formatting survive both, because they edit the raw text
+rather than re-serialising the file.
 
 Uncommitted edits to tracked files block an update, because a fast-forward
 would clobber them — `--stash` is the way through. Untracked files never block

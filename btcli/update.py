@@ -162,6 +162,199 @@ def _load_json_with_comments(path: Path) -> dict:
     return json.loads(cleaned)
 
 
+def _key_line_span(lines: list, key: str) -> list:
+    """Line indexes belonging to every declaration of *key*, comments excluded.
+
+    Works on the raw text rather than a parsed dict so the rest of the file —
+    comments, ordering, formatting — survives untouched. A value may span
+    several lines, so each declaration runs until brackets balance and the entry
+    is closed.
+    """
+    spans = []
+    opener = re.compile(r'^\s*"' + re.escape(key) + r'"\s*:')
+
+    index = 0
+    while index < len(lines):
+        if not opener.match(lines[index]):
+            index += 1
+            continue
+
+        start = index
+        depth = 0
+        in_string = False
+        escaped = False
+        while index < len(lines):
+            for char in lines[index]:
+                if escaped:
+                    escaped = False
+                    continue
+                if char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = not in_string
+                elif not in_string:
+                    if char in "[{":
+                        depth += 1
+                    elif char in "]}":
+                        depth -= 1
+            index += 1
+            if depth <= 0:
+                break
+        spans.append((start, index))
+
+    return spans
+
+
+def reset_settings(user_file: Path, default_file: Path, keys: list,
+                   apply: bool = True) -> dict:
+    """Restore the shipped default for each of *keys*, in place.
+
+    Rewrites only those entries and leaves the rest of the file — including
+    comments — alone. A key declared more than once collapses to a single
+    entry, which is the point: JSON silently keeps the last of a repeated key,
+    so the file can hold two values for one setting.
+
+    Returns a summary with 'reset', 'unknown', 'absent' and 'collapsed'.
+    """
+    summary: dict = {"reset": {}, "unknown": [], "absent": [], "collapsed": []}
+
+    if not default_file.exists():
+        raise UpdateError(f"{default_file.name} not found — no defaults to reset to.")
+    if not user_file.exists():
+        raise UpdateError(f"{user_file} does not exist yet; run btcli update first.")
+
+    defaults = _load_json_with_comments(default_file)
+    raw = user_file.read_text(encoding="utf-8")
+    lines = raw.splitlines(keepends=True)
+
+    # Resolve every key first, so an unknown name changes nothing.
+    targets = {}
+    for key in keys:
+        if key not in defaults:
+            summary["unknown"].append(key)
+            continue
+        spans = _key_line_span(lines, key)
+        if not spans:
+            summary["absent"].append(key)
+            continue
+        if len(spans) > 1:
+            summary["collapsed"].append(key)
+        targets[key] = spans
+        summary["reset"][key] = defaults[key]
+
+    if summary["unknown"]:
+        raise UpdateError(
+            f"Not a known setting: {', '.join(summary['unknown'])}\n"
+            f"  Names are case-sensitive; see {default_file.name} for the full list."
+        )
+    if not targets or not apply:
+        return summary
+
+    # Rewrite from the bottom up so earlier line numbers stay valid.
+    replacements = []
+    for key, spans in targets.items():
+        value = json.dumps(defaults[key], ensure_ascii=False)
+        for position, (start, end) in enumerate(spans):
+            # Only the first declaration keeps a line; the rest are dropped.
+            text = f'  "{key}": {value},\n' if position == 0 else None
+            replacements.append((start, end, text))
+
+    for start, end, text in sorted(replacements, key=lambda item: -item[0]):
+        trailing = lines[end - 1].rstrip()
+        had_comma = trailing.endswith(",")
+        if text is None:
+            lines[start:end] = []
+        else:
+            if not had_comma:
+                text = text.rstrip("\n").rstrip(",") + "\n"
+            lines[start:end] = [text]
+
+    updated = "".join(lines)
+    # A dropped duplicate can leave the final entry with a trailing comma.
+    updated = re.sub(r',(\s*})', r'\1', updated)
+
+    # Never write something we cannot read back.
+    try:
+        _load_json_with_comments_text(updated)
+    except Exception as e:
+        raise UpdateError(
+            f"Resetting would have produced an unreadable {user_file.name} ({e}); "
+            f"nothing was written."
+        )
+
+    backup = user_file.with_suffix(user_file.suffix + ".bak")
+    backup.write_text(raw, encoding="utf-8")
+    user_file.write_text(updated, encoding="utf-8")
+    summary["backup"] = backup
+    return summary
+
+
+def dedupe_settings(user_file: Path, apply: bool = True) -> dict:
+    """Remove repeated declarations of a setting, keeping the one in effect.
+
+    JSON keeps the last of a repeated key, so the last declaration is the value
+    already being used. Keeping it means the file starts saying what btcli was
+    doing all along — nothing changes behaviour, the config just stops lying.
+
+    Distinct from --reset, which restores the shipped default and so may change
+    a value you chose deliberately.
+    """
+    summary: dict = {"removed": {}, "backup": None}
+
+    if not user_file.exists():
+        raise UpdateError(f"{user_file} does not exist.")
+
+    raw = user_file.read_text(encoding="utf-8")
+    from .validate import find_duplicate_keys
+    duplicates = find_duplicate_keys(raw)
+    if not duplicates:
+        return summary
+
+    lines = raw.splitlines(keepends=True)
+    kept = _load_json_with_comments_text(raw)
+
+    drop: list = []
+    for key in duplicates:
+        spans = _key_line_span(lines, key)
+        # Keep the final declaration; it is the one JSON already honours.
+        for start, end in spans[:-1]:
+            drop.append((start, end))
+        summary["removed"][key] = {"dropped": len(spans) - 1, "kept": kept.get(key)}
+
+    if not apply:
+        return summary
+
+    for start, end in sorted(drop, key=lambda item: -item[0]):
+        lines[start:end] = []
+
+    updated = "".join(lines)
+    try:
+        reparsed = _load_json_with_comments_text(updated)
+    except Exception as e:
+        raise UpdateError(
+            f"Removing duplicates would have produced an unreadable "
+            f"{user_file.name} ({e}); nothing was written.")
+
+    # The effective configuration must be identical, or this did more than dedupe.
+    if reparsed != kept:
+        raise UpdateError(
+            f"Removing duplicates would have changed the effective settings; "
+            f"nothing was written. Edit {user_file.name} by hand.")
+
+    backup = user_file.with_suffix(user_file.suffix + ".bak")
+    backup.write_text(raw, encoding="utf-8")
+    user_file.write_text(updated, encoding="utf-8")
+    summary["backup"] = backup
+    return summary
+
+
+def _load_json_with_comments_text(raw: str) -> dict:
+    """Parse settings text that may contain // comments and trailing commas."""
+    cleaned = re.sub(r'(?m)^\s*//.*$', '', raw)
+    cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
+    return json.loads(cleaned)
+
+
 def merge_settings(user_file: Path, default_file: Path, apply: bool = True) -> dict:
     """Add settings present in defaults but missing from the user config.
 
@@ -219,8 +412,21 @@ def merge_settings(user_file: Path, default_file: Path, apply: bool = True) -> d
 # ── flow ──────────────────────────────────────────────────────────────────────
 
 def run_update(branch: str | None = None, check: bool = False,
-               stash: bool = False) -> None:
+               stash: bool = False, reset: list | None = None,
+               dedupe: bool = False) -> None:
     """Run the update flow. See module docstring for the argument meanings."""
+    if reset or dedupe:
+        log.sep()
+        log.phase("RESET SETTINGS" if reset else "DEDUPE SETTINGS")
+        try:
+            if reset:
+                _run_reset(reset)
+            else:
+                _run_dedupe()
+        except UpdateError as e:
+            log.error(str(e))
+        return
+
     log.sep()
     log.phase("UPDATE — checking for a newer version" if check else "UPDATE")
 
@@ -228,6 +434,53 @@ def run_update(branch: str | None = None, check: bool = False,
         _run_update(branch=branch, check=check, stash=stash)
     except UpdateError as e:
         log.error(str(e))
+
+
+def _run_reset(keys: list) -> None:
+    """Restore the shipped defaults for the named settings."""
+    repo = find_repo()
+    user_file = _settings_path(repo)
+    summary = reset_settings(user_file, _default_path(repo), keys)
+
+    if summary["absent"]:
+        log.info(f"Already using the default (not set in your config): "
+                 f"{', '.join(summary['absent'])}")
+    if not summary["reset"]:
+        log.success("Nothing to change.")
+        return
+
+    for key in summary["collapsed"]:
+        log.warning(f"{key} was declared more than once; collapsed to a single entry.")
+
+    log.success(f"Reset {len(summary['reset'])} setting(s) in {user_file.name}:")
+    for key, value in summary["reset"].items():
+        rendered = json.dumps(value, ensure_ascii=False)
+        if len(rendered) > 70:
+            rendered = rendered[:67] + "..."
+        log.item(f"{key}: {rendered}")
+    log.detail(f"  Previous version saved as {summary['backup'].name}")
+
+
+def _run_dedupe() -> None:
+    """Collapse repeated settings, keeping the value already in effect."""
+    repo = find_repo()
+    user_file = _settings_path(repo)
+    summary = dedupe_settings(user_file)
+
+    if not summary["removed"]:
+        log.success("No setting is declared more than once.")
+        return
+
+    log.success(f"Collapsed {len(summary['removed'])} repeated setting(s) in "
+                f"{user_file.name}:")
+    for key, info in summary["removed"].items():
+        rendered = json.dumps(info["kept"], ensure_ascii=False)
+        if len(rendered) > 60:
+            rendered = rendered[:57] + "..."
+        log.item(f"{key}: dropped {info['dropped']} earlier declaration(s), "
+                 f"kept {rendered}")
+    log.info("  Your effective settings are unchanged; only the duplicates are gone.")
+    log.detail(f"  Previous version saved as {summary['backup'].name}")
 
 
 def _run_update(branch: str | None, check: bool, stash: bool) -> None:

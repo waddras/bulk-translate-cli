@@ -460,12 +460,38 @@ OPTIONS
   --check          report what an update would do, change nothing
   --branch NAME    switch to NAME and update that instead of the current branch
   --stash          set local edits aside, update, then restore them
+  --reset KEYS     restore the shipped default for these settings
+  --dedupe         remove repeated settings, keeping the value in effect
+
+REPAIRING settings.conf
+  Because your values are never overwritten, a setting can go stale: it keeps
+  working while no longer matching what the code expects. --check-settings warns
+  about the cases that matter, and two options fix them without touching
+  anything else in the file. Both write a .bak first, and neither pulls code.
+
+  --reset KEYS restores the shipped default. Use it when a value is simply
+  wrong, such as a PROMPT_TEMPLATE still demanding a JSON object:
+
+    btcli update --reset PROMPT_TEMPLATE
+    btcli update --reset PROMPT_TEMPLATE,STRIP_TAGS
+
+  Careful: it restores the DEFAULT, so it will discard a value you chose on
+  purpose.
+
+  --dedupe removes repeated declarations of the same setting. JSON silently
+  keeps the last one, so a file can hold two values for one key and look fine.
+  Dedupe keeps the one already in effect, so nothing changes behaviour — the
+  file just stops disagreeing with itself:
+
+    btcli update --dedupe
 
 EXAMPLES
-  btcli update                      # update the current branch
-  btcli update --check              # is there anything new?
-  btcli update --branch main        # move back to the release branch
-  btcli update --stash              # update despite local edits
+  btcli update                          # update the current branch
+  btcli update --check                  # is there anything new?
+  btcli update --branch main            # move back to the release branch
+  btcli update --stash                  # update despite local edits
+  btcli update --reset PROMPT_TEMPLATE  # restore one setting's default
+  btcli update --dedupe                 # collapse repeated settings
   btcli --verbose update
 """
 
@@ -630,6 +656,13 @@ def _parse_args():
                           help="Switch to NAME and update it. Default: the current branch")
     p_update.add_argument("--stash", action="store_true",
                           help="Set uncommitted edits aside, update, then restore them")
+    p_update.add_argument("--reset", default=None, metavar="KEYS",
+                          help="Restore the shipped default for these settings "
+                               "(comma-separated), leaving the rest of your "
+                               "settings.conf untouched. Pulls no code")
+    p_update.add_argument("--dedupe", action="store_true",
+                          help="Remove repeated settings, keeping the value already "
+                               "in effect. Changes no behaviour. Pulls no code")
 
     return parser.parse_args()
 
@@ -770,7 +803,10 @@ def main():
 
     elif args.command == "update":
         from .update import run_update
-        run_update(branch=args.branch, check=args.check, stash=args.stash)
+        reset_keys = ([k.strip() for k in args.reset.split(",") if k.strip()]
+                      if args.reset else None)
+        run_update(branch=args.branch, check=args.check, stash=args.stash,
+                   reset=reset_keys, dedupe=args.dedupe)
 
     log.close()
 
