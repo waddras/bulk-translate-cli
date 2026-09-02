@@ -15,6 +15,7 @@ import asyncio
 import re
 from collections import Counter
 from pathlib import Path
+from typing import NamedTuple
 
 from .ai import run_translation
 from .batch import BatchWriter
@@ -182,6 +183,352 @@ def _parse_language(lang_arg: str) -> tuple:
     return cfg.get("SOURCE_LANGUAGE", "english"), lang_arg.strip().lower()
 
 
+# ── Run setup ─────────────────────────────────────────────────────────────────
+
+def _new_manifest_run(*, path: str, input_type: str, source_lang: str,
+                      target_lang: str, suffix: str, track_indices: list | None,
+                      force_srt: bool, force: bool, files_per_call: int | None,
+                      dry_run: bool):
+    """Open the job record for this run.
+
+    A dry run records nothing, so it gets a null record rather than creating or
+    modifying .btcli.json.
+    """
+    from .manifest import ManifestRun, NullManifestRun
+
+    if dry_run:
+        return NullManifestRun()
+    return ManifestRun({
+        "path": str(Path(path).resolve()),
+        "input_type": input_type,
+        "source_language": source_lang,
+        "target_language": target_lang,
+        "suffix": suffix,
+        "tracks": track_indices or [0],
+        "force_srt": force_srt,
+        "force_extraction": force,
+        "files_per_call": files_per_call,
+        "model": cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+        "translation_mode": cfg.get("TRANSLATION_MODE", "chunked"),
+        "max_lines_per_chunk": cfg.get("MAX_LINES_PER_CHUNK", 1000),
+        "parallel_chunks": cfg.get("PARALLEL_CHUNKS", 1),
+    })
+
+
+def _resolve_api_key(dry_run: bool) -> str | None:
+    """The API key, or None when the run cannot proceed without one.
+
+    A dry run never calls the API, so it does not need a key — which means a job
+    can be previewed before one is set up.
+    """
+    api_key = cfg.get("GEMINI_API_KEY", "")
+    if api_key:
+        return api_key
+    if dry_run:
+        return ""
+    from .setup_key import check_api_key
+    return check_api_key() or None
+
+
+def _log_run_header(path: str, input_type: str, suffix: str, force_srt: bool,
+                    source_lang: str, target_lang: str, dry_run: bool) -> None:
+    log.sep()
+    log.phase(f"{'DRY RUN' if dry_run else 'TRANSLATE'} - {source_lang} → {target_lang}")
+    log.stat("Path", path)
+    log.stat("Input", f"{input_type} | Suffix: {suffix} | Force SRT: {force_srt}")
+    if dry_run:
+        log.info("  Nothing will be sent to the API, written, or recorded.")
+    log.sep()
+
+
+# ── Resolving what to translate ───────────────────────────────────────────────
+
+class _Inputs(NamedTuple):
+    """The subtitle files a run will work on.
+
+    show_name is carried back because video extraction has to resolve it early,
+    to record the series in the manifest. early_result is set when the run is
+    finished without translating anything — a dry run over video input stops
+    before extraction, since extraction writes files.
+    """
+    files: list
+    show_name: str
+    early_result: dict | None
+
+
+def _resolve_input_files(*, path, input_type, filter_pattern, preset_files,
+                         track_indices, auto_track, force, force_srt,
+                         source_lang, suffix, show_name, manifest_run,
+                         dry_run) -> _Inputs:
+    """Find the subtitle files to translate, extracting them first if needed."""
+    if input_type == "vid":
+        return _extract_subtitle_files(
+            path=path, filter_pattern=filter_pattern, preset_files=preset_files,
+            track_indices=track_indices, auto_track=auto_track, force=force,
+            force_srt=force_srt, source_lang=source_lang, show_name=show_name,
+            manifest_run=manifest_run, dry_run=dry_run,
+        )
+    return _discover_subtitle_files(
+        path=path, filter_pattern=filter_pattern, preset_files=preset_files,
+        suffix=suffix, show_name=show_name,
+    )
+
+
+def _discover_subtitle_files(*, path, filter_pattern, preset_files, suffix,
+                             show_name) -> _Inputs:
+    """Find existing subtitle files, never treating our own output as a source."""
+    files = [Path(f) for f in preset_files] if preset_files else discover_files(
+        path, mode="sub", scan_mode="recursive", filter_pattern=filter_pattern)
+    if not files:
+        log.error(f"No subtitle files found in: {path}")
+        if filter_pattern:
+            log.detail(f"  (filter: '{filter_pattern}')")
+        return _Inputs([], show_name, None)
+
+    files, prior_output = exclude_translated_output(files, suffix)
+    if prior_output:
+        log.info(f"Skipping {len(prior_output)} previously translated "
+                 f"file(s) ending in '{suffix}'")
+        for item in prior_output[:5]:
+            log.detail(f"  skipped: {Path(item).name}")
+    if not files:
+        log.error(f"Only previously translated files found in: {path}")
+        return _Inputs([], show_name, None)
+
+    return _Inputs(files, show_name, None)
+
+
+def _resolve_tracks(video_files: list, track_indices: list | None,
+                    auto_track: bool | None) -> list:
+    """Which subtitle track(s) to pull out of each video."""
+    if not auto_track:
+        return track_indices or [0]
+
+    from .auto import auto_select_track_from_files
+    detected = auto_select_track_from_files(video_files)
+    if detected is not None:
+        return [detected]
+    log.warning("Auto-detect failed, using track 0")
+    return track_indices or [0]
+
+
+def _extract_subtitle_files(*, path, filter_pattern, preset_files, track_indices,
+                            auto_track, force, force_srt, source_lang,
+                            show_name, manifest_run, dry_run) -> _Inputs:
+    """Pull subtitle tracks out of video files, reusing earlier extractions."""
+    video_files = [Path(f) for f in preset_files] if preset_files else discover_files(
+        path, mode="vid", scan_mode="recursive", filter_pattern=filter_pattern)
+    if not video_files:
+        log.error(f"No video files found in: {path}")
+        return _Inputs([], show_name, None)
+
+    log.info(f"Found {len(video_files)} video file(s)")
+    tracks = _resolve_tracks(video_files, track_indices, auto_track)
+
+    if dry_run:
+        return _Inputs([], show_name, _preview_extraction(video_files, tracks, path))
+
+    log.info(f"Extracting track(s): {tracks}")
+    log.sep()
+
+    if not show_name:
+        show_name = _detect_show_name(video_files)
+    manifest_run.register_files(video_files, series=show_name)
+    manifest_run.update_command(show_name=show_name, tracks=tracks)
+
+    # Extract with the source language suffix so the file is kept. A previous
+    # manifest record is reusable only when its file still exists.
+    from .manifest import find_reusable_extraction
+    source_suffix = get_suffix_for_lang(source_lang)
+    sub_files = extract_from_videos(
+        [str(f) for f in video_files],
+        tracks,
+        suffix=source_suffix,
+        force_srt=force_srt,
+        force=force,
+        reuse_lookup=find_reusable_extraction,
+        extraction_callback=lambda video, valid_tracks, extracted, codec, reused: (
+            manifest_run.record_extraction(video, valid_tracks, extracted, codec, reused)
+        ),
+    )
+    if not sub_files:
+        log.error("No subtitles extracted.")
+        manifest_run.finish()
+        return _Inputs([], show_name, None)
+
+    return _Inputs([Path(f) for f in sub_files], show_name, None)
+
+
+def _preview_extraction(video_files: list, tracks: list, path: str) -> dict:
+    """Report what would be extracted, without extracting it.
+
+    Extraction writes files, so a dry run stops here. Cue and line counts are
+    only knowable once a track has been extracted, so say so plainly rather
+    than guessing.
+    """
+    log.sep()
+    log.phase("DRY RUN - extraction step")
+    log.stat("Videos found", str(len(video_files)))
+    log.stat("Track(s) that would be extracted", ", ".join(map(str, tracks)))
+    for index, video in enumerate(video_files, 1):
+        log.item(f"[{index:02d}] {Path(video).name}")
+    log.info("  Extraction is skipped in a dry run, so cue and line counts "
+             "are not available for video input.")
+    log.info("  For full numbers, extract once and dry-run with -i sub, "
+             "or run without --dry-run.")
+    return {"completed": [], "warnings": [], "missing": {},
+            "files": video_files, "path": path, "dry_run": True,
+            "previews": []}
+
+
+# ── Reporting ─────────────────────────────────────────────────────────────────
+
+def _report_files(files: list) -> None:
+    log.sep()
+    log.phase(f"FILES - {len(files)} subtitle file(s)")
+    for index, item in enumerate(files, 1):
+        item = Path(item)
+        log.item(f"[{index:02d}] {item.name}  ({item.stat().st_size / 1024:.1f} KB)")
+
+
+def _resolve_styles(files: list, keep_styles: list | None,
+                    passthrough_styles: list | None, manifest_run) -> tuple:
+    """Decide which styles are translated and which pass through untouched.
+
+    Resolved once for the whole run, so every batch treats styles the same way.
+    """
+    log.sep()
+    log.phase("STYLE DETECTION")
+
+    if keep_styles is not None or passthrough_styles is not None:
+        from .styles import resolve_styles_with_files
+        from .srt_pre import get_styles_from_files
+        all_styles = get_styles_from_files([str(f) for f in files])
+        keep_styles, passthrough_styles = resolve_styles_with_files(
+            keep_styles, passthrough_styles, all_styles, [str(f) for f in files]
+        )
+
+    if keep_styles is None:
+        keep_styles = _auto_detect_styles(files)
+
+    if keep_styles:
+        log.info(f"Styles to translate: {', '.join(keep_styles)}")
+    if passthrough_styles:
+        log.info(f"Passthrough styles: {', '.join(passthrough_styles)}")
+
+    manifest_run.update_command(
+        styles_to_translate=keep_styles or [],
+        passthrough_styles=passthrough_styles or [],
+    )
+    return keep_styles, passthrough_styles
+
+
+def _report_completion(completed: list, warnings: list, missing: dict) -> None:
+    log.sep()
+    log.summary("Translation Complete", [
+        ("Files written", str(len(completed))),
+        ("Warnings", str(len(warnings)) if warnings else "0"),
+        ("Lines missing", str(len(missing)) if missing else "0"),
+        ("Elapsed", log.elapsed()),
+    ])
+    for item in completed:
+        log.success(f"  done: {item}")
+    for warning in warnings:
+        log.warning(warning)
+
+
+def _build_result(*, completed, warnings, missing, files, path, source_lang,
+                  target_lang, keep_styles, passthrough_styles, show_name,
+                  suffix, force_srt) -> dict:
+    """The dict the caller gets back.
+
+    Interactive mode reuses these values to offer a retry or a passthrough pass
+    without asking every question again.
+    """
+    return {
+        "completed": completed,
+        "warnings": warnings,
+        "missing": missing,
+        "files": files,
+        "path": path,
+        "lang": f"{source_lang},{target_lang}",
+        "keep_styles": keep_styles,
+        "passthrough_styles": passthrough_styles,
+        "show_name": show_name,
+        "suffix": suffix,
+        "force_srt": force_srt,
+    }
+
+
+# ── Batching ──────────────────────────────────────────────────────────────────
+
+def _split_into_batches(files: list) -> list:
+    """Group files into batches that are deduplicated and chunked together.
+
+    Sizes are evened out rather than leaving a tiny final batch, since a batch
+    that shares more context translates more consistently.
+    """
+    batch_size = cfg.get("FILES_PER_BATCH", 25)
+    if len(files) <= batch_size:
+        return [files]
+
+    count = (len(files) + batch_size - 1) // batch_size
+    even = (len(files) + count - 1) // count
+    batches = [files[i:i + even] for i in range(0, len(files), even)]
+    log.info(f"Splitting into {len(batches)} batch(es) of ~{even} files")
+    return batches
+
+
+def _merge_missing(target: dict, batch_missing: dict) -> None:
+    """Fold one batch's missing lines into the run total, keeping files unique."""
+    for key, info in batch_missing.items():
+        merged = target.setdefault(key, {"text": info["text"], "files": []})
+        for name in info["files"]:
+            if name not in merged["files"]:
+                merged["files"].append(name)
+
+
+def _run_batches(*, files, keep_styles, passthrough_styles, show_name,
+                 source_lang, target_lang, api_key, suffix, force_srt,
+                 files_per_call, manifest_run, use_cache, write_only,
+                 allow_resume_prompt, dry_run, previews) -> tuple:
+    """Translate every batch and merge the results.
+
+    The manifest is closed whatever happens, so an interrupted run still leaves
+    a readable record of what it managed to do.
+    """
+    batches = _split_into_batches(files)
+    completed: list = []
+    warnings: list = []
+    missing: dict = {}
+
+    try:
+        for number, batch_files in enumerate(batches, 1):
+            if len(batches) > 1:
+                log.sep()
+                log.phase(f"BATCH {number}/{len(batches)} — {len(batch_files)} file(s)")
+
+            batch_completed, batch_warnings, batch_missing = _translate_batch(
+                batch_files, keep_styles, passthrough_styles,
+                show_name, source_lang, target_lang,
+                api_key, suffix, force_srt,
+                files_per_call=files_per_call,
+                manifest_run=manifest_run,
+                use_cache=use_cache,
+                write_only=write_only,
+                allow_resume_prompt=allow_resume_prompt,
+                dry_run=dry_run,
+                previews=previews,
+            )
+            completed.extend(batch_completed)
+            warnings.extend(batch_warnings)
+            _merge_missing(missing, batch_missing)
+    finally:
+        manifest_run.finish()
+
+    return completed, warnings, missing
+
+
 # ── Main Translate Runner ─────────────────────────────────────────────────────
 
 def run_translate(
@@ -206,6 +553,10 @@ def run_translate(
 ) -> dict | None:
     """Run the full translation pipeline.
 
+    Reads in the order the pipeline runs: set up, resolve the input files,
+    resolve the styles, translate each batch, report. Each step is a helper
+    above so this stays a summary of the flow rather than the whole of it.
+
     Args:
         path: file or directory path
         lang: target language or "source,target" pair
@@ -224,267 +575,291 @@ def run_translate(
         dry_run: report the work and stop. Makes no request, writes no file, and
             records nothing in the manifest or cache.
     """
-    # Parse language
     source_lang, target_lang = _parse_language(lang)
     if suffix is None:
         suffix = get_suffix_for_lang(target_lang)
     if files_per_call is not None and files_per_call < 1:
         log.error("--files-per-call must be at least 1")
-        return
+        return None
 
-    # A dry run records nothing, so it cannot create or modify .btcli.json.
-    from .manifest import ManifestRun, NullManifestRun
-    manifest_run = NullManifestRun() if dry_run else ManifestRun({
-        "path": str(Path(path).resolve()),
-        "input_type": input_type,
-        "source_language": source_lang,
-        "target_language": target_lang,
-        "suffix": suffix,
-        "tracks": track_indices or [0],
-        "force_srt": force_srt,
-        "force_extraction": force,
-        "files_per_call": files_per_call,
-        "model": cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
-        "translation_mode": cfg.get("TRANSLATION_MODE", "chunked"),
-        "max_lines_per_chunk": cfg.get("MAX_LINES_PER_CHUNK", 1000),
-        "parallel_chunks": cfg.get("PARALLEL_CHUNKS", 1),
-    })
+    manifest_run = _new_manifest_run(
+        path=path, input_type=input_type, source_lang=source_lang,
+        target_lang=target_lang, suffix=suffix, track_indices=track_indices,
+        force_srt=force_srt, force=force, files_per_call=files_per_call,
+        dry_run=dry_run,
+    )
 
-    # API key check. A dry run never calls the API, so it does not need one.
-    api_key = cfg.get("GEMINI_API_KEY", "")
-    if not api_key and dry_run:
-        api_key = ""
-    elif not api_key:
-        from .setup_key import check_api_key
-        api_key = check_api_key()
-        if not api_key:
-            return
+    api_key = _resolve_api_key(dry_run)
+    if api_key is None:
+        return None
 
-    log.sep()
-    log.phase(f"{'DRY RUN' if dry_run else 'TRANSLATE'} - {source_lang} → {target_lang}")
-    log.stat("Path", path)
-    log.stat("Input", f"{input_type} | Suffix: {suffix} | Force SRT: {force_srt}")
-    if dry_run:
-        log.info("  Nothing will be sent to the API, written, or recorded.")
-    log.sep()
+    _log_run_header(path, input_type, suffix, force_srt,
+                    source_lang, target_lang, dry_run)
 
-    # Phase 0: Discover/Extract files
-    if input_type == "vid":
-        video_files = [Path(f) for f in preset_files] if preset_files else discover_files(
-            path, mode="vid", scan_mode="recursive", filter_pattern=filter_pattern)
-        if not video_files:
-            log.error(f"No video files found in: {path}")
-            return
+    inputs = _resolve_input_files(
+        path=path, input_type=input_type, filter_pattern=filter_pattern,
+        preset_files=preset_files, track_indices=track_indices,
+        auto_track=auto_track, force=force, force_srt=force_srt,
+        source_lang=source_lang, suffix=suffix, show_name=show_name,
+        manifest_run=manifest_run, dry_run=dry_run,
+    )
+    if inputs.early_result is not None:
+        return inputs.early_result
+    if not inputs.files:
+        return None
 
-        log.info(f"Found {len(video_files)} video file(s)")
-
-        # Auto track detection
-        if auto_track:
-            from .auto import auto_select_track_from_files
-            detected = auto_select_track_from_files(video_files)
-            if detected is not None:
-                track_indices = [detected]
-            else:
-                log.warning("Auto-detect failed, using track 0")
-                track_indices = track_indices or [0]
-        else:
-            track_indices = track_indices or [0]
-
-        tracks = track_indices
-
-        # Extraction writes files, so a dry run stops before it. Line counts are
-        # only knowable once a track has been extracted, so say so plainly rather
-        # than guessing.
-        if dry_run:
-            log.sep()
-            log.phase("DRY RUN - extraction step")
-            log.stat("Videos found", str(len(video_files)))
-            log.stat("Track(s) that would be extracted", ", ".join(map(str, tracks)))
-            for index, video in enumerate(video_files, 1):
-                log.item(f"[{index:02d}] {Path(video).name}")
-            log.info("  Extraction is skipped in a dry run, so cue and line counts "
-                     "are not available for video input.")
-            log.info("  For full numbers, extract once and dry-run with -i sub, "
-                     "or run without --dry-run.")
-            return {"completed": [], "warnings": [], "missing": {},
-                    "files": video_files, "path": path, "dry_run": True,
-                    "previews": []}
-
-        log.info(f"Extracting track(s): {tracks}")
-        log.sep()
-
-        if not show_name:
-            show_name = _detect_show_name(video_files)
-        manifest_run.register_files(video_files, series=show_name)
-        manifest_run.update_command(show_name=show_name, tracks=tracks)
-
-        # Extract with source language suffix so the file is kept. A previous
-        # manifest record is reusable only when its file still exists.
-        from .manifest import find_reusable_extraction
-        source_suffix = get_suffix_for_lang(source_lang)
-        sub_files = extract_from_videos(
-            [str(f) for f in video_files],
-            tracks,
-            suffix=source_suffix,
-            force_srt=force_srt,
-            force=force,
-            reuse_lookup=find_reusable_extraction,
-            extraction_callback=lambda video, valid_tracks, extracted, codec, reused: (
-                manifest_run.record_extraction(video, valid_tracks, extracted, codec, reused)
-            ),
-        )
-        if not sub_files:
-            log.error("No subtitles extracted.")
-            manifest_run.finish()
-            return
-
-        files = [Path(f) for f in sub_files]
-    else:
-        files = [Path(f) for f in preset_files] if preset_files else discover_files(
-            path, mode="sub", scan_mode="recursive", filter_pattern=filter_pattern)
-        if not files:
-            log.error(f"No subtitle files found in: {path}")
-            if filter_pattern:
-                log.detail(f"  (filter: '{filter_pattern}')")
-            return
-
-        # Never treat this tool's own output as a source.
-        files, prior_output = exclude_translated_output(files, suffix)
-        if prior_output:
-            log.info(f"Skipping {len(prior_output)} previously translated "
-                     f"file(s) ending in '{suffix}'")
-            for item in prior_output[:5]:
-                log.detail(f"  skipped: {Path(item).name}")
-        if not files:
-            log.error(f"Only previously translated files found in: {path}")
-            return
-
+    files, show_name = inputs.files, inputs.show_name
     if not show_name:
         show_name = _detect_show_name(files)
     manifest_run.register_files(files, series=show_name)
     manifest_run.update_command(show_name=show_name)
 
-    # Report files
-    log.sep()
-    log.phase(f"FILES - {len(files)} subtitle file(s)")
-    for i, f in enumerate(files, 1):
-        f = Path(f)
-        log.item(f"[{i:02d}] {f.name}  ({f.stat().st_size / 1024:.1f} KB)")
-
-    # Resolve styles once (applies to all batches)
-    log.sep()
-    log.phase("STYLE DETECTION")
-
-    if keep_styles is not None or passthrough_styles is not None:
-        from .styles import resolve_styles_with_files
-        from .srt_pre import get_styles_from_files
-        all_styles = get_styles_from_files([str(f) for f in files])
-        keep_styles, passthrough_styles = resolve_styles_with_files(
-            keep_styles, passthrough_styles, all_styles, [str(f) for f in files]
-        )
-
-    if keep_styles is None:
-        keep_styles = _auto_detect_styles(files)
-
-    if keep_styles:
-        log.info(f"Styles to translate: {', '.join(keep_styles)}")
-    if passthrough_styles:
-        log.info(f"Passthrough styles: {', '.join(passthrough_styles)}")
-
-    manifest_run.update_command(
-        styles_to_translate=keep_styles or [],
-        passthrough_styles=passthrough_styles or [],
-    )
-
-    # Detect show name once
-    if not show_name:
-        show_name = _detect_show_name(files)
+    _report_files(files)
+    keep_styles, passthrough_styles = _resolve_styles(
+        files, keep_styles, passthrough_styles, manifest_run)
     log.stat("Show name", show_name)
 
-    # Batch files — distribute evenly, max FILES_PER_BATCH per batch
-    batch_size = cfg.get("FILES_PER_BATCH", 25)
-    total_files = len(files)
-
-    if total_files <= batch_size:
-        batches = [files]
-    else:
-        num_batches = (total_files + batch_size - 1) // batch_size
-        even_size = (total_files + num_batches - 1) // num_batches
-        batches = [files[i:i + even_size] for i in range(0, total_files, even_size)]
-        log.info(f"Splitting into {len(batches)} batch(es) of ~{even_size} files")
-
-    # Process each batch
-    all_completed = []
-    all_warnings = []
-
-    all_missing: dict = {}
     previews: list = []
+    completed, warnings, missing = _run_batches(
+        files=files, keep_styles=keep_styles,
+        passthrough_styles=passthrough_styles, show_name=show_name,
+        source_lang=source_lang, target_lang=target_lang, api_key=api_key,
+        suffix=suffix, force_srt=force_srt, files_per_call=files_per_call,
+        manifest_run=manifest_run, use_cache=use_cache, write_only=write_only,
+        allow_resume_prompt=allow_resume_prompt, dry_run=dry_run,
+        previews=previews,
+    )
 
-    try:
-        for batch_num, batch_files in enumerate(batches, 1):
-            if len(batches) > 1:
-                log.sep()
-                log.phase(f"BATCH {batch_num}/{len(batches)} — {len(batch_files)} file(s)")
-
-            batch_completed, batch_warnings, batch_missing = _translate_batch(
-                batch_files, keep_styles, passthrough_styles,
-                show_name, source_lang, target_lang,
-                api_key, suffix, force_srt,
-                files_per_call=files_per_call,
-                manifest_run=manifest_run,
-                use_cache=use_cache,
-                write_only=write_only,
-                allow_resume_prompt=allow_resume_prompt,
-                dry_run=dry_run,
-                previews=previews,
-            )
-            all_completed.extend(batch_completed)
-            all_warnings.extend(batch_warnings)
-            for key, info in batch_missing.items():
-                merged = all_missing.setdefault(key, {"text": info["text"], "files": []})
-                for name in info["files"]:
-                    if name not in merged["files"]:
-                        merged["files"].append(name)
-    finally:
-        manifest_run.finish()
+    result = _build_result(
+        completed=completed, warnings=warnings, missing=missing, files=files,
+        path=path, source_lang=source_lang, target_lang=target_lang,
+        keep_styles=keep_styles, passthrough_styles=passthrough_styles,
+        show_name=show_name, suffix=suffix, force_srt=force_srt,
+    )
 
     if dry_run:
         from .preview import render_total
         if len(previews) > 1:
             render_total(previews)
-        return {"completed": [], "warnings": [], "missing": {}, "files": files,
-                "path": path, "dry_run": True, "previews": previews,
-                "keep_styles": keep_styles, "passthrough_styles": passthrough_styles,
-                "show_name": show_name, "suffix": suffix,
-                "lang": f"{source_lang},{target_lang}", "force_srt": force_srt}
+        result.update({"completed": [], "warnings": [], "missing": {},
+                       "dry_run": True, "previews": previews})
+        return result
 
-    # Final report
+    _report_completion(completed, warnings, missing)
+    return result
+
+
+# ── One batch ─────────────────────────────────────────────────────────────────
+
+class _BatchAborted(Exception):
+    """Raised when a batch cannot proceed. Carries any warning worth reporting."""
+
+    def __init__(self, warnings=()):
+        super().__init__("batch aborted")
+        self.warnings = list(warnings)
+
+
+def _early_failure_recorder(files: list, manifest_run, source_lang: str,
+                            target_lang: str, suffix: str,
+                            files_per_call: int | None):
+    """Build a callback that records every file in the batch as failed.
+
+    Used when a batch aborts before any file could be written, so the manifest
+    explains why rather than simply omitting them.
+    """
+    def record(status: str, reason: str) -> None:
+        if not manifest_run:
+            return
+        for source in files:
+            manifest_run.record_translation(Path(source), {
+                "output": None,
+                "source_language": source_lang,
+                "target_language": target_lang,
+                "suffix": suffix,
+                "model": cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+                "mode": cfg.get("TRANSLATION_MODE", "chunked"),
+                "files_per_call": files_per_call,
+                "status": status,
+                "reason": reason,
+                "elapsed": log.elapsed(),
+            })
+    return record
+
+
+def _build_batch_blob(files: list, keep_styles: list | None, record_failure) -> tuple:
+    """Build the deduplicated blob for a batch.
+
+    Raises _BatchAborted when the batch holds no dialogue, or is larger than
+    MAX_BLOB_LINES allows.
+    """
     log.sep()
-    log.summary("Translation Complete", [
-        ("Files written", str(len(all_completed))),
-        ("Warnings", str(len(all_warnings)) if all_warnings else "0"),
-        ("Lines missing", str(len(all_missing)) if all_missing else "0"),
-        ("Elapsed", log.elapsed()),
-    ])
+    log.phase("PHASE 1 - Building blob...")
+    meta, payload, stats = build_blob(files, keep_styles=keep_styles)
 
-    for f in all_completed:
-        log.success(f"  done: {f}")
-    for w in all_warnings:
-        log.warning(w)
+    if stats["total"] == 0:
+        log.warning("No dialogue cues found in this batch.")
+        record_failure("no_dialogue", "No dialogue cues matched the selected styles")
+        raise _BatchAborted()
 
-    return {
-        "completed": all_completed,
-        "warnings": all_warnings,
-        "missing": all_missing,
-        "files": files,
-        "path": path,
-        "lang": f"{source_lang},{target_lang}",
-        "keep_styles": keep_styles,
-        "passthrough_styles": passthrough_styles,
-        "show_name": show_name,
-        "suffix": suffix,
-        "force_srt": force_srt,
-    }
+    max_blob = cfg.get("MAX_BLOB_LINES", 50000)
+    if stats["total"] > max_blob:
+        log.error(f"Too many cues ({stats['total']} > {max_blob}). Reduce FILES_PER_BATCH.")
+        reason = f"Batch exceeded MAX_BLOB_LINES ({stats['total']} > {max_blob})"
+        record_failure("failed", reason)
+        raise _BatchAborted([reason])
+
+    log.info(f"DEDUP: {stats['total']} total → {stats['unique']} unique "
+             f"({stats['collapsed']} collapsed, ~{stats['pct']}% fewer tokens)")
+    return meta, payload, stats
+
+
+def _report_cache_state(cache, cached_hits: dict, to_translate: dict,
+                        declined: bool) -> None:
+    """Always say what the cache did, so resuming is never a mystery."""
+    if declined:
+        log.info(f"CACHE: {cache.loaded} cached line(s) ignored by choice; "
+                 f"translating all {len(to_translate)} line(s) fresh")
+    elif cached_hits:
+        log.info(f"CACHE: {len(cached_hits)} line(s) already translated, "
+                 f"{len(to_translate)} still to translate")
+        log.detail(f"  Cache file: {cache.path}")
+    elif cache.loaded:
+        log.info(f"CACHE: {cache.loaded} entry(ies) on file, none match this "
+                 f"batch; {len(to_translate)} line(s) to translate")
+    else:
+        log.info(f"CACHE: empty so far; {len(to_translate)} line(s) to "
+                 f"translate, cached as they complete")
+
+
+def _resolve_cache(*, files, payload, target_lang, use_cache, write_only,
+                   allow_resume_prompt) -> tuple:
+    """Split the payload into lines already translated and lines still needed.
+
+    Returns (cache, cached_hits, to_translate). cache is None when caching is
+    off, in which case nothing is read from or written to disk.
+    """
+    if not (use_cache and cfg.get("USE_TRANSLATION_CACHE", True)):
+        if not use_cache:
+            log.info("CACHE: disabled (--no-cache), translating every line")
+        return None, {}, payload
+
+    from .cache import TranslationCache, series_root_for
+    cache = TranslationCache(series_root_for(files), target_lang)
+    cached_hits, to_translate = cache.split(payload)
+
+    # Offer to resume. Asked once per run, and never during a retry or
+    # passthrough pass, which are already an answer to this question.
+    declined = False
+    if cached_hits and allow_resume_prompt and not write_only:
+        if not _ask_resume(len(cached_hits), len(to_translate), cache.path):
+            declined = True
+            cached_hits, to_translate = {}, payload
+
+    _report_cache_state(cache, cached_hits, to_translate, declined)
+    return cache, cached_hits, to_translate
+
+
+def _plan_chunks(*, to_translate, meta, files_per_call, write_only) -> list:
+    """Split what needs translating into API calls, and report the plan."""
+    log.sep()
+    log.phase("PHASE 2 - Splitting into chunks...")
+
+    if write_only or not to_translate:
+        chunks = []
+        log.info("No chunks needed")
+    elif files_per_call:
+        chunks = split_blob_by_files(to_translate, meta, files_per_call)
+        log.info(f"Split into {len(chunks)} call(s), up to {files_per_call} whole file(s) per call")
+        log.info("MAX_LINES_PER_CHUNK bypassed for this run")
+    else:
+        chunks = split_blob(to_translate)
+        log.info(f"Split into {len(chunks)} chunk(s)")
+
+    total_tokens = 0
+    for index, chunk in enumerate(chunks, 1):
+        estimate = estimate_output_tokens(chunk)
+        total_tokens += estimate
+        log.detail(f"  Chunk {index}: {len(chunk)} lines, ~{estimate} output tokens")
+    log.stat("Chunk sizes", ", ".join(str(len(chunk)) for chunk in chunks) or "none")
+    log.stat("Total estimated output tokens", str(total_tokens))
+    return chunks
+
+
+def _preview_batch(*, files, stats, cached_hits, chunks, writer, suffix,
+                   source_lang, target_lang, mode, files_per_call,
+                   previews) -> None:
+    """Report the shape of the work this batch would do, and record it."""
+    from .preview import render, summarise
+
+    summary = summarise(
+        files=files, stats=stats, cached=len(cached_hits), chunks=chunks,
+        required_by_file=writer.required_by_file,
+        tolerance=max(0, cfg.get("PARTIAL_LINE_TOLERANCE", 10)),
+        suffix=suffix, source_lang=source_lang, target_lang=target_lang,
+        mode=mode, files_per_call=files_per_call,
+    )
+    render(summary)
+    if previews is not None:
+        previews.append(summary)
+
+
+def _send_chunks(*, chunks, payload, api_key, show_name, source_lang,
+                 target_lang, cache, to_translate, cached_hits, writer) -> dict:
+    """Send every chunk, caching and writing results as they arrive.
+
+    Each response is cached before any file is written, so an interrupted run
+    never loses translated lines.
+    """
+    def on_progress(fresh: dict) -> None:
+        if cache is not None:
+            cache.store_and_flush(to_translate, fresh)
+        writer.write_ready({**cached_hits, **fresh})
+
+    log.sep()
+    log.phase("PHASE 3 - Translating and writing completed files...")
+
+    if not chunks:
+        return {}
+
+    fresh: dict = {}
+    log.start_progress("Translating", total=len(chunks))
+    try:
+        fresh = asyncio.run(
+            run_translation(
+                chunks, payload, api_key, show_name, source_lang, target_lang,
+                progress_callback=on_progress,
+            )
+        )
+    finally:
+        # Always tear the live display down, even on error or Ctrl-C.
+        log.finish_progress()
+        if cache is not None:
+            cache.store_and_flush(to_translate, fresh)
+    return fresh
+
+
+def _finalize_batch(*, writer, payload, translated_unique, write_only, cache,
+                    files) -> dict:
+    """Write or report whatever is left, then report how the batch went.
+
+    Passthrough deliberately ignores the tolerance, since its whole purpose is
+    to write every file regardless of how many lines are still in the source
+    language.
+    """
+    log.sep()
+    log.phase("PHASE 4 - Finalizing file completion...")
+    tolerance = (len(payload) if write_only
+                 else max(0, cfg.get("PARTIAL_LINE_TOLERANCE", 10)))
+    still_missing = writer.finalize(translated_unique, tolerance)
+
+    total_keys = len(payload)
+    translated_count = len(set(payload) & set(translated_unique))
+    pct = round(translated_count / total_keys * 100) if total_keys else 0
+    log.info(f"  Batch: {translated_count}/{total_keys} unique lines ({pct}%)")
+    log.info(f"  Files written: {len(writer.emitted)}/{len(files)}")
+    if cache is not None and cache.added:
+        log.info(f"  Cached {cache.added} new line(s) for future runs")
+    return still_missing
 
 
 def _translate_batch(
@@ -514,78 +889,19 @@ def _translate_batch(
     Returns (completed, warnings, still_missing), where still_missing maps a
     representative key to {"text": source line, "files": [output names]}.
     """
+    record_failure = _early_failure_recorder(
+        files, manifest_run, source_lang, target_lang, suffix, files_per_call)
 
-    def _record_early_failure(status: str, reason: str) -> None:
-        if not manifest_run:
-            return
-        for source in files:
-            manifest_run.record_translation(Path(source), {
-                "output": None,
-                "source_language": source_lang,
-                "target_language": target_lang,
-                "suffix": suffix,
-                "model": cfg.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
-                "mode": cfg.get("TRANSLATION_MODE", "chunked"),
-                "files_per_call": files_per_call,
-                "status": status,
-                "reason": reason,
-                "elapsed": log.elapsed(),
-            })
+    try:
+        meta, payload, stats = _build_batch_blob(files, keep_styles, record_failure)
+    except _BatchAborted as aborted:
+        return [], aborted.warnings, {}
 
-    # Phase 1: Build blob
-    log.sep()
-    log.phase("PHASE 1 - Building blob...")
-    meta, payload, stats = build_blob(files, keep_styles=keep_styles)
-    if stats["total"] == 0:
-        log.warning("No dialogue cues found in this batch.")
-        _record_early_failure("no_dialogue", "No dialogue cues matched the selected styles")
-        return [], [], {}
-
-    max_blob = cfg.get("MAX_BLOB_LINES", 50000)
-    if stats["total"] > max_blob:
-        log.error(f"Too many cues ({stats['total']} > {max_blob}). Reduce FILES_PER_BATCH.")
-        reason = f"Batch exceeded MAX_BLOB_LINES ({stats['total']} > {max_blob})"
-        _record_early_failure("failed", reason)
-        return [], [reason], {}
-
-    log.info(f"DEDUP: {stats['total']} total → {stats['unique']} unique "
-             f"({stats['collapsed']} collapsed, ~{stats['pct']}% fewer tokens)")
-
-    # Cache: lines already translated in an earlier run are served from disk,
-    # so only what is genuinely missing is sent to the API.
-    cache = None
-    cached_hits: dict = {}
-    to_translate = payload
-    if use_cache and cfg.get("USE_TRANSLATION_CACHE", True):
-        from .cache import TranslationCache, series_root_for
-        cache = TranslationCache(series_root_for(files), target_lang)
-        cached_hits, to_translate = cache.split(payload)
-
-        # Offer to resume. Asked once per run, and never during a retry or
-        # passthrough pass, which are already an answer to this question.
-        declined = False
-        if cached_hits and allow_resume_prompt and not write_only:
-            if not _ask_resume(len(cached_hits), len(to_translate), cache.path):
-                declined = True
-                cached_hits, to_translate = {}, payload
-
-        # Always say something about the cache, so it is never a mystery
-        # whether resuming is in effect.
-        if declined:
-            log.info(f"CACHE: {cache.loaded} cached line(s) ignored by choice; "
-                     f"translating all {len(to_translate)} line(s) fresh")
-        elif cached_hits:
-            log.info(f"CACHE: {len(cached_hits)} line(s) already translated, "
-                     f"{len(to_translate)} still to translate")
-            log.detail(f"  Cache file: {cache.path}")
-        elif cache.loaded:
-            log.info(f"CACHE: {cache.loaded} entry(ies) on file, none match this "
-                     f"batch; {len(to_translate)} line(s) to translate")
-        else:
-            log.info(f"CACHE: empty so far; {len(to_translate)} line(s) to "
-                     f"translate, cached as they complete")
-    elif not use_cache:
-        log.info("CACHE: disabled (--no-cache), translating every line")
+    cache, cached_hits, to_translate = _resolve_cache(
+        files=files, payload=payload, target_lang=target_lang,
+        use_cache=use_cache, write_only=write_only,
+        allow_resume_prompt=allow_resume_prompt,
+    )
 
     if write_only:
         log.info(f"PASSTHROUGH: writing from cache only, {len(to_translate)} "
@@ -593,27 +909,8 @@ def _translate_batch(
     elif not to_translate:
         log.success("Every line was already translated - nothing to send to the API")
 
-    # Phase 2: Split into line chunks or explicit whole-file calls.
-    log.sep()
-    log.phase("PHASE 2 - Splitting into chunks...")
-    if write_only or not to_translate:
-        chunks = []
-        log.info("No chunks needed")
-    elif files_per_call:
-        chunks = split_blob_by_files(to_translate, meta, files_per_call)
-        log.info(f"Split into {len(chunks)} call(s), up to {files_per_call} whole file(s) per call")
-        log.info("MAX_LINES_PER_CHUNK bypassed for this run")
-    else:
-        chunks = split_blob(to_translate)
-        log.info(f"Split into {len(chunks)} chunk(s)")
-
-    total_tokens = 0
-    for i, chunk in enumerate(chunks, 1):
-        estimate = estimate_output_tokens(chunk)
-        total_tokens += estimate
-        log.detail(f"  Chunk {i}: {len(chunk)} lines, ~{estimate} output tokens")
-    log.stat("Chunk sizes", ", ".join(str(len(chunk)) for chunk in chunks) or "none")
-    log.stat("Total estimated output tokens", str(total_tokens))
+    chunks = _plan_chunks(to_translate=to_translate, meta=meta,
+                          files_per_call=files_per_call, write_only=write_only)
 
     mode = cfg.get("TRANSLATION_MODE", "chunked")
     log.stat("Translation mode", mode)
@@ -629,63 +926,24 @@ def _translate_batch(
     # A dry run stops here: the shape of the work is known, so report it and
     # make no request, write no file, and record nothing.
     if dry_run:
-        from .preview import render, summarise
-        summary = summarise(
-            files=files, stats=stats, cached=len(cached_hits), chunks=chunks,
-            required_by_file=writer.required_by_file,
-            tolerance=max(0, cfg.get("PARTIAL_LINE_TOLERANCE", 10)),
-            suffix=suffix, source_lang=source_lang, target_lang=target_lang,
-            mode=mode, files_per_call=files_per_call,
+        _preview_batch(
+            files=files, stats=stats, cached_hits=cached_hits, chunks=chunks,
+            writer=writer, suffix=suffix, source_lang=source_lang,
+            target_lang=target_lang, mode=mode, files_per_call=files_per_call,
+            previews=previews,
         )
-        render(summary)
-        if previews is not None:
-            previews.append(summary)
         return [], [], {}
 
-    # Phase 3: Translate. After each response the new lines are written to the
-    # cache first, then any file that is now complete is generated, so an
-    # interrupted run never loses translated lines.
-    def _on_progress(fresh: dict) -> None:
-        if cache is not None:
-            cache.store_and_flush(to_translate, fresh)
-        writer.write_ready({**cached_hits, **fresh})
+    fresh = _send_chunks(
+        chunks=chunks, payload=payload, api_key=api_key, show_name=show_name,
+        source_lang=source_lang, target_lang=target_lang, cache=cache,
+        to_translate=to_translate, cached_hits=cached_hits, writer=writer,
+    )
 
-    log.sep()
-    log.phase("PHASE 3 - Translating and writing completed files...")
-
-    fresh_translations: dict = {}
-    if chunks:
-        log.start_progress("Translating", total=len(chunks))
-        try:
-            fresh_translations = asyncio.run(
-                run_translation(
-                    chunks, payload, api_key, show_name, source_lang, target_lang,
-                    progress_callback=_on_progress,
-                )
-            )
-        finally:
-            # Always tear the live display down, even on error or Ctrl-C.
-            log.finish_progress()
-            if cache is not None:
-                cache.store_and_flush(to_translate, fresh_translations)
-
-    translated_unique = {**cached_hits, **fresh_translations}
-
-    # Phase 4: write or report whatever is left. Passthrough deliberately ignores
-    # the tolerance, since its whole purpose is to write every file regardless of
-    # how many lines are still in the source language.
-    log.sep()
-    log.phase("PHASE 4 - Finalizing file completion...")
-    tolerance = (len(payload) if write_only
-                 else max(0, cfg.get("PARTIAL_LINE_TOLERANCE", 10)))
-    still_missing = writer.finalize(translated_unique, tolerance)
-
-    total_keys = len(payload)
-    translated_count = len(set(payload) & set(translated_unique))
-    pct = round(translated_count / total_keys * 100) if total_keys else 0
-    log.info(f"  Batch: {translated_count}/{total_keys} unique lines ({pct}%)")
-    log.info(f"  Files written: {len(writer.emitted)}/{len(files)}")
-    if cache is not None and cache.added:
-        log.info(f"  Cached {cache.added} new line(s) for future runs")
+    translated_unique = {**cached_hits, **fresh}
+    still_missing = _finalize_batch(
+        writer=writer, payload=payload, translated_unique=translated_unique,
+        write_only=write_only, cache=cache, files=files,
+    )
 
     return writer.completed, writer.warnings, still_missing
