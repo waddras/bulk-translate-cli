@@ -291,8 +291,15 @@ FIXES AVAILABLE WITH --apply
               SRT: split literal \\N back into real lines (repairs two-line
               cues that were merged onto one line and appeared reversed)
   font        re-embed the Arabic font subset in ASS using ASS UUEncode
+  font-strip  remove the embedded font, saving roughly 200KB per file. Use this
+              once the player supplies Arabic fonts itself, for example through
+              Jellyfin's fallback font path, so existing files can be slimmed
+              without re-translating them
   style       re-apply font name/size/outline/margins from settings.conf
-  all         every fix above (default)
+  all         rtl, linebreak, font and style
+
+  font-strip is NOT part of "all", because it is the opposite of "font".
+  Asking for both at once is refused rather than guessed at.
 
 TARGETING FILES
   -f is a filename substring filter, default ".ar." so only translated files
@@ -302,6 +309,7 @@ EXAMPLES
   btcli fix -p "/media/anime/Show" --apply all --backup
   btcli fix -p "/media/tv/Show" -f ".ar.srt" --apply linebreak,rtl
   btcli fix -p ep.ar.ass --apply font,style
+  btcli fix -p "/media/anime" --apply font-strip --backup
   btcli fix -p "/media/anime" -f ".ara." --apply rtl
 
 Use --backup to write a .bak copy before overwriting. Files are edited in

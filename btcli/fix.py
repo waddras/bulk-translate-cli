@@ -22,7 +22,11 @@ from .sub_post import (
     RLI, PDI, wrap_rtl, embed_font_in_ass, _build_ass_style,
 )
 
-AVAILABLE_FIXES = ["rtl", "font", "style", "linebreak", "all"]
+AVAILABLE_FIXES = ["rtl", "font", "font-strip", "style", "linebreak", "all"]
+
+# font-strip is deliberately excluded from "all": it is the opposite of "font",
+# and removing a font is only wanted when the player supplies its own.
+ALL_FIXES = ["rtl", "font", "style", "linebreak"]
 
 
 def run_fix(path: str, filter_pattern: str | None = None,
@@ -35,9 +39,13 @@ def run_fix(path: str, filter_pattern: str | None = None,
         apply: comma-separated fix names or "all"
         backup: if True, save .bak before overwriting
     """
-    fixes = [f.strip() for f in apply.split(",")]
+    fixes = [f.strip() for f in apply.split(",") if f.strip()]
     if "all" in fixes:
-        fixes = ["rtl", "font", "style", "linebreak"]
+        fixes = list(ALL_FIXES)
+
+    if "font" in fixes and "font-strip" in fixes:
+        log.error("font and font-strip are opposites - choose one.")
+        return
 
     # Validate
     for f in fixes:
@@ -117,13 +125,24 @@ def _fix_ass_file(fpath: Path, fixes: list, backup: bool) -> None:
     if modified:
         content = subs.to_string("ass")
 
-    # Fix: font — re-embed font
+    # Fix: font — re-embed the font, replacing any existing one
     if "font" in fixes:
-        # Remove existing [Fonts] section if present
         content = _strip_fonts_section(content)
         if cfg.get("EMBED_FONT", True):
             content = embed_font_in_ass(content)
-            log.detail(f"        Applied font fix")
+            log.detail("        Applied font fix")
+        else:
+            log.detail("        EMBED_FONT is false, so no font was embedded")
+
+    # Fix: font-strip — remove the embedded font and leave it out
+    if "font-strip" in fixes:
+        if has_embedded_font(content):
+            before = len(content.encode("utf-8"))
+            content = _strip_fonts_section(content)
+            saved = before - len(content.encode("utf-8"))
+            log.info(f"        Removed embedded font ({saved // 1024} KB saved)")
+        else:
+            log.detail("        No embedded font to remove")
 
     fpath.write_text(content, encoding="utf-8")
 
@@ -173,7 +192,33 @@ def _fix_srt_file(fpath: Path, fixes: list, backup: bool) -> None:
 
 
 def _strip_fonts_section(content: str) -> str:
-    """Remove existing [Fonts] section from ASS content."""
-    # [Fonts] section goes to end of file or next section
-    pattern = r'\n?\[Fonts\]\n.*'
-    return re.sub(pattern, '', content, flags=re.DOTALL)
+    """Remove the [Fonts] section from ASS content.
+
+    Scans line by line and stops at the next section header. A regex to the end
+    of the file would work only while [Fonts] is last, and would silently delete
+    [Events] in a file that places fonts before the dialogue.
+    """
+    kept = []
+    inside_fonts = False
+
+    for line in content.splitlines(keepends=True):
+        stripped = line.strip()
+        is_section = stripped.startswith("[") and stripped.endswith("]")
+
+        if is_section and stripped.lower() == "[fonts]":
+            inside_fonts = True
+            continue
+        if inside_fonts:
+            if is_section:
+                inside_fonts = False      # a new section ends the font block
+            else:
+                continue                  # drop the encoded font payload
+        kept.append(line)
+
+    return "".join(kept)
+
+
+def has_embedded_font(content: str) -> bool:
+    """True when ASS content carries an embedded [Fonts] section."""
+    return any(line.strip().lower() == "[fonts]"
+               for line in content.splitlines())
