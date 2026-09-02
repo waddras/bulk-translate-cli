@@ -29,10 +29,14 @@ GLOBAL FLAGS MUST COME BEFORE THE SUBCOMMAND
   btcli translate -p FILE --log-file /tmp/b.log              WRONG (rejected)
 
 QUICK START
+  btcli interactive                                   guided, asks per folder
   btcli probe -p "/media/anime/Show"                  see tracks + styles first
   btcli translate -p "/media/anime/Show" --auto       translate a whole folder
   btcli translate -p ep.mkv -s "ALL,+karaoke"         translate one file
   btcli fix -p "/media/anime/Show" --apply all        repair existing output
+
+  Every command defaults -p to the CURRENT directory, and scanning never goes
+  more than one directory deep (a series folder with season folders is covered).
 
 HOW TRANSLATION WORKS
   Phase 0  discover files; extract subtitle tracks from video (ffmpeg)
@@ -204,6 +208,49 @@ Use --backup to write a .bak copy before overwriting. Files are edited in
 place, so --backup is recommended the first time.
 """
 
+INTERACTIVE_EPILOG = """\
+Guided translation. Nothing is written or sent until you confirm the summary.
+
+WHAT IT ASKS
+  1. input type: vid (extract tracks from video) or sub (existing subtitles)
+  2. path (press Enter for the current directory)
+  3. for EVERY folder found one level deep, it samples ONE file and asks:
+       - which subtitle track to use (bitmap tracks are shown but rejected)
+       - which styles to translate, as a numbered list
+  4. force re-extraction? (default no)
+  5. files per API call? (default auto)
+  6. a summary, then Proceed? [Y/n]
+
+  Each folder keeps its OWN track and style choice, so a series whose seasons
+  differ is handled in one pass.
+
+STYLE SELECTION
+  The numbered list comes from the sampled file. Numbers and style names may be
+  mixed, and a leading + means passthrough (copied to the output untouched, not
+  sent to the API).
+
+    +ALL,1          passthrough all styles, translate only style 1
+    1,2,+karaoke    translate styles 1 and 2, passthrough karaoke
+    ALL,+karaoke    translate all styles, passthrough karaoke   (default)
+    1,3,+ALL        translate styles 1 and 3, passthrough the rest
+    +3              passthrough style 3
+
+WHEN A FOLDER HAS NO TRACKS
+  If a video has no subtitle tracks but subtitle files sit beside it, you are
+  asked whether to use those instead. Folders with neither are skipped.
+
+NOTES
+  Target language comes from settings.conf and is never prompted.
+  Style sampling extracts one track to a temporary file, which is discarded.
+  Ctrl-C before the summary cancels safely; nothing is written.
+  Needs a real terminal - use 'btcli translate' in scripts.
+
+EXAMPLES
+  btcli interactive
+  btcli -v interactive
+  btcli interactive -p "/media/anime/Chihayafuru"
+"""
+
 UPDATE_EPILOG = """\
 Update the installed copy of btcli.
 
@@ -258,8 +305,8 @@ def _parse_args():
         epilog=PROBE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_probe.add_argument("-p", required=True, metavar="PATH",
-                         help="File or directory to inspect")
+    p_probe.add_argument("-p", default=".", metavar="PATH",
+                         help="File or directory to inspect. Default: current directory")
     p_probe.add_argument("-i", default="vid", choices=["vid", "sub"],
                          help="Input type: vid (video files) or sub (subtitle files). Default: vid")
     p_probe.add_argument("-m", default="sample", choices=["sample", "recursive"],
@@ -279,8 +326,8 @@ def _parse_args():
         epilog=TRANSLATE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_trans.add_argument("-p", required=True, metavar="PATH",
-                         help="File or directory to translate")
+    p_trans.add_argument("-p", default=".", metavar="PATH",
+                         help="File or directory to translate. Default: current directory")
     p_trans.add_argument("-l", default="arabic", metavar="LANG",
                          help="Target language, or 'source,target' pair (e.g. 'japanese,english'). Default: arabic")
     p_trans.add_argument("-i", default="vid", choices=["vid", "sub"],
@@ -315,14 +362,28 @@ def _parse_args():
         epilog=FIX_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_fix.add_argument("-p", required=True, metavar="PATH",
-                       help="File or directory to repair")
+    p_fix.add_argument("-p", default=".", metavar="PATH",
+                       help="File or directory to repair. Default: current directory")
     p_fix.add_argument("-f", default=".ar.", metavar="FILTER",
                        help="Only files whose name contains this substring. Default: '.ar.'")
     p_fix.add_argument("--apply", default="all", metavar="FIXES",
                        help="Fixes to apply: rtl, font, style, linebreak, all (comma-separated). Default: all")
     p_fix.add_argument("--backup", action="store_true",
                        help="Write a .bak copy before overwriting each file")
+
+    # ── interactive ───────────────────────────────────────────────────────────
+    p_inter = sub.add_parser(
+        "interactive",
+        help="Guided mode: pick track and styles per folder, then translate",
+        description="Walk through each folder one level deep, choosing the subtitle "
+                    "track and the styles to translate, then translate every folder "
+                    "with its own settings.",
+        epilog=INTERACTIVE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_inter.add_argument("-p", default=None, metavar="PATH",
+                         help="Skip the path prompt and use this path. Default: ask, "
+                              "offering the current directory")
 
     # ── update ────────────────────────────────────────────────────────────────
     sub.add_parser(
@@ -357,17 +418,20 @@ def main():
         print("No command specified. Run 'btcli -h' for full help,")
         print("or 'btcli COMMAND -h' for details on a command.\n")
         print("Commands:")
-        print("  probe      Inspect subtitle tracks, styles, and tags (no API calls)")
-        print("  translate  Translate subtitle files or video subtitle tracks")
-        print("  fix        Repair already-translated files (no API calls)")
-        print("  update     Pull latest code + merge new settings\n")
+        print("  interactive  Guided mode: pick track and styles per folder")
+        print("  probe        Inspect subtitle tracks, styles, and tags (no API calls)")
+        print("  translate    Translate subtitle files or video subtitle tracks")
+        print("  fix          Repair already-translated files (no API calls)")
+        print("  update       Pull latest code + merge new settings\n")
         print("Common usage:")
+        print("  btcli interactive [-p PATH]")
         print("  btcli probe -p PATH [-i vid|sub] [-m sample|recursive] [-f FILTER] [-o tracks,styles,tags]")
         print("  btcli translate -p PATH [-l LANG] [-i vid|sub] [-f FILTER] [-t TRACKS]")
         print("                  [-s STYLES] [-suffix .ar] [-o srt] [--show-name NAME]")
         print("                  [--auto] [--force] [--files-per-call N]")
         print("  btcli fix -p PATH [-f FILTER] [--apply rtl,font,style,linebreak,all] [--backup]")
         print("  btcli update\n")
+        print("Paths default to the current directory; scanning stops one directory deep.\n")
         print("Skip karaoke while translating dialogue:")
         print("  btcli translate -p PATH -s \"ALL,+karaoke\"")
         print("  btcli translate -p PATH --auto\n")
@@ -434,6 +498,10 @@ def main():
             apply=args.apply,
             backup=args.backup,
         )
+
+    elif args.command == "interactive":
+        from .interactive import run_interactive
+        run_interactive(path=args.p)
 
     elif args.command == "update":
         from .update import run_update

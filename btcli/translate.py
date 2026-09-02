@@ -159,6 +159,7 @@ def run_translate(
     auto_track: bool | None = None,
     force: bool = False,
     files_per_call: int | None = None,
+    preset_files: list | None = None,
 ) -> None:
     """Run the full translation pipeline.
 
@@ -171,6 +172,9 @@ def run_translate(
         suffix: output suffix override (e.g. ".ar")
         force_srt: force SRT output
         show_name: override auto-detected show name
+        preset_files: explicit input files, skipping discovery. Interactive mode
+            uses this so a per-directory run cannot pick up a sibling
+            directory's files.
     """
     # Parse language
     source_lang, target_lang = _parse_language(lang)
@@ -213,8 +217,8 @@ def run_translate(
 
     # Phase 0: Discover/Extract files
     if input_type == "vid":
-        video_files = discover_files(path, mode="vid", scan_mode="recursive",
-                                     filter_pattern=filter_pattern)
+        video_files = [Path(f) for f in preset_files] if preset_files else discover_files(
+            path, mode="vid", scan_mode="recursive", filter_pattern=filter_pattern)
         if not video_files:
             log.error(f"No video files found in: {path}")
             return
@@ -264,8 +268,8 @@ def run_translate(
 
         files = [Path(f) for f in sub_files]
     else:
-        files = discover_files(path, mode="sub", scan_mode="recursive",
-                               filter_pattern=filter_pattern)
+        files = [Path(f) for f in preset_files] if preset_files else discover_files(
+            path, mode="sub", scan_mode="recursive", filter_pattern=filter_pattern)
         if not files:
             log.error(f"No subtitle files found in: {path}")
             if filter_pattern:

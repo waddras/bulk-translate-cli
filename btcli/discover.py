@@ -72,7 +72,11 @@ def discover_files(
 
 
 def _discover_recursive(root: Path, extensions: set, filter_pattern: str | None) -> list:
-    """Find all matching files in root and one level of subdirs."""
+    """Find matching files in root and its immediate subdirs.
+
+    Scanning is capped at ONE directory deep on purpose: a series folder holding
+    season folders is covered, while unrelated deeper trees are never walked.
+    """
     files = []
 
     # Files in root directory
@@ -80,15 +84,30 @@ def _discover_recursive(root: Path, extensions: set, filter_pattern: str | None)
         if f.is_file() and f.suffix.lower() in extensions and _matches_filter(f, filter_pattern):
             files.append(f)
 
-    # Files in immediate subdirectories
+    # Files in immediate subdirectories only (no deeper recursion)
     for subdir in sorted(root.iterdir()):
         if not subdir.is_dir() or subdir.name.startswith(".") or _is_skipped(subdir):
             continue
-        for f in subdir.rglob("*"):
+        for f in subdir.iterdir():
             if f.is_file() and f.suffix.lower() in extensions and _matches_filter(f, filter_pattern):
                 files.append(f)
 
     return sorted(files)
+
+
+def group_by_directory(path: str, mode: str = "sub",
+                       filter_pattern: str | None = None) -> dict:
+    """Group discovered files by their parent directory, one level deep.
+
+    Returns an ordered {directory: [files]} mapping, which is what interactive
+    mode iterates over so each season folder can get its own settings.
+    """
+    files = discover_files(path, mode=mode, scan_mode="recursive",
+                           filter_pattern=filter_pattern)
+    grouped: dict = {}
+    for f in files:
+        grouped.setdefault(f.parent, []).append(f)
+    return {d: sorted(grouped[d]) for d in sorted(grouped)}
 
 
 def _discover_sample(root: Path, extensions: set, filter_pattern: str | None) -> list:
