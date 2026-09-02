@@ -270,6 +270,11 @@ class Logger:
 
     def start_progress(self, description: str, total: int):
         """Start a progress bar (medium and full modes only)."""
+        # Only one live display may be active at a time; tear down any leftover
+        # bar first so a second phase cannot collide with it.
+        if self._progress is not None:
+            self.finish_progress()
+
         if self.is_minimal or not self._rich_available:
             self._write_file(f"Starting: {description} ({total} items)")
             return

@@ -95,6 +95,24 @@ def _discover_recursive(root: Path, extensions: set, filter_pattern: str | None)
     return sorted(files)
 
 
+def exclude_translated_output(files: list, suffix: str) -> tuple:
+    """Split files into (sources, previously translated output).
+
+    Output files are named "<stem><suffix>.<ext>", so a stem ending in the
+    target suffix is this tool's own output. Re-translating those would produce
+    doubled names like name.ar.ar.ass and waste API quota.
+    """
+    marker = suffix.lower()
+    if not marker:
+        return list(files), []
+
+    sources, outputs = [], []
+    for item in files:
+        stem = Path(str(item)).stem.lower()
+        (outputs if stem.endswith(marker) else sources).append(item)
+    return sources, outputs
+
+
 def group_by_directory(path: str, mode: str = "sub",
                        filter_pattern: str | None = None) -> dict:
     """Group discovered files by their parent directory, one level deep.

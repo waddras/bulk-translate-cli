@@ -55,6 +55,34 @@ RELIABILITY
   cue. Mismatched, duplicated, or missing IDs are rejected and retried
   individually rather than silently accepted.
 
+RESUME AND THE TRANSLATION CACHE (.btcli-cache.json)
+  Every translated line is written to a cache at the series root AS EACH API
+  RESPONSE ARRIVES, not at the end. So an interrupted run, a crash, or a job
+  that ends with files incomplete never loses the lines it already paid for.
+
+  Re-running is therefore a resume: cached lines are reused and only missing
+  lines are sent. A file that failed on 2 lines out of 500 costs 2 lines to
+  finish, not 500. Keyed by source text, so renaming files, reordering cues, or
+  re-extracting a track cannot corrupt it. Use --no-cache to translate fresh.
+
+  Seasons of one series share the cache, so repeated lines (openings, endings,
+  catchphrases) are only ever translated once.
+
+PARTIAL FILES
+  A file missing PARTIAL_LINE_TOLERANCE lines or fewer (default 10) is written
+  anyway, with those lines left in the source language and listed in the log.
+  Missing more than that and the file is skipped instead. Either way the lines
+  are recorded, and a later run finishes the file and rewrites it complete.
+
+RETRY WHEN LINES ARE MISSING
+  If any lines are still missing when a job ends, btcli reports them once,
+  after every folder, and offers to retry immediately at a smaller chunk size
+  (50% by default, or any percentage or line count). One oversized request that
+  fails takes down every line in it, scattering damage across many files, so
+  smaller chunks recover far more. The retry only sends missing lines and loops
+  until it succeeds or you decline. The chunk size you pick applies to that
+  session only and is never written to settings.conf.
+
 JOB MANIFEST (.btcli.json)
   Each media directory gets a hidden .btcli.json recording every btcli run as
   job1, job2, job3 ... with the tracks extracted, files written, chunk sizes,
@@ -142,6 +170,20 @@ CHUNKING
   Large batches are also grouped by FILES_PER_BATCH (default 25) and refuse to
   run if a batch exceeds MAX_BLOB_LINES.
 
+  A single failed request loses every line in it. Big chunks therefore damage
+  many files at once, which is why --files-per-call 1, or a smaller
+  MAX_LINES_PER_CHUNK, recovers more when the API is unreliable.
+
+RESUME, PARTIAL FILES, AND RETRY
+  Translated lines are cached at the series root as each response arrives, so
+  re-running this same command resumes instead of starting over: only missing
+  lines are sent. Pass --no-cache to ignore the cache and translate fresh.
+
+  Files missing 10 lines or fewer (PARTIAL_LINE_TOLERANCE) are written with
+  those lines left in the source language and reported; more than that and the
+  file is skipped. When the job ends with lines missing, btcli offers to retry
+  them at a smaller chunk size.
+
 EXAMPLES
   btcli translate -p "/media/anime/Show" --auto
   btcli translate -p "/media/tv/Show/Season 1" -s "ALL,+karaoke" -t 0
@@ -221,6 +263,10 @@ WHAT IT ASKS
   5. force re-extraction? (default no)
   6. files per API call? (default auto)
   7. a summary, then Proceed? [Y/n]
+
+  When every folder has finished, any lines still missing are reported once and
+  you are offered a retry at a smaller chunk size. Translated lines are already
+  cached, so the retry only sends what is missing.
 
   Each folder keeps its OWN track and style choice, so a series whose seasons
   differ is handled in one pass.
@@ -364,6 +410,8 @@ def _parse_args():
                          help="Ignore the .btcli.json manifest and re-extract subtitles even if already extracted")
     p_trans.add_argument("--files-per-call", "-fpc", type=int, default=None, metavar="N",
                          help="Send N whole subtitle files per API call, ignoring MAX_LINES_PER_CHUNK")
+    p_trans.add_argument("--no-cache", action="store_true",
+                         help="Ignore the translation cache and re-translate every line")
 
     # ── fix ───────────────────────────────────────────────────────────────────
     p_fix = sub.add_parser(
@@ -486,7 +534,7 @@ def main():
         if args.auto and args.t == "0" and args.i == "vid":
             auto_track = True
 
-        run_translate(
+        result = run_translate(
             path=args.p,
             lang=args.l,
             input_type=args.i,
@@ -500,7 +548,13 @@ def main():
             auto_track=auto_track,
             force=args.force,
             files_per_call=args.files_per_call,
+            use_cache=not args.no_cache,
         )
+
+        # Offer to re-send only the missing lines, once, at the very end.
+        if result and result.get("missing"):
+            from .retry import offer_retry
+            offer_retry([result], api_key="")
 
     elif args.command == "fix":
         from .fix import run_fix

@@ -387,6 +387,7 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
     retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
     parallel = max(1, cfg.get("PARALLEL_CHUNKS", 1))
     total = len(chunks)
+    failures: list = []
 
     async def _translate_one(chunk, chunk_num):
         """Translate a single chunk with retries."""
@@ -412,8 +413,12 @@ async def translate_chunked(client: httpx.AsyncClient, chunks: list, api_key: st
             if attempt < retry_attempts:
                 await asyncio.sleep(retry_cooldown * attempt)
 
+        # A failed chunk is deliberately NOT counted as progress: completing the
+        # bar stops its elapsed clock, which reads as a frozen display while
+        # retries are still running.
+        failures.append(chunk_num)
         log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
-        log.advance_progress()
+        log.update_progress(description=f"Translating ({len(failures)} failed)")
         return None
 
     # Send chunks in parallel batches — cooldown between batches, not individual calls
@@ -456,6 +461,7 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
     gen_cfg = _generation_config()
     retry_attempts = cfg.get("RETRY_ATTEMPTS", 5)
     retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
+    failures: list = []
 
     context_text = (
         f"You are a professional {source_lang} to {target_lang} subtitle translator.\n"
@@ -515,8 +521,9 @@ async def translate_multi_turn(client: httpx.AsyncClient, chunks: list,
                 if attempt < retry_attempts:
                     await asyncio.sleep(retry_cooldown)
         else:
+            failures.append(chunk_num)
             log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
-            log.advance_progress()
+            log.update_progress(description=f"Translating ({len(failures)} failed)")
 
     return translated
 
@@ -534,6 +541,7 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
     translated = {}
     retry_attempts = cfg.get("RETRY_ATTEMPTS", 5)
     retry_cooldown = cfg.get("RETRY_COOLDOWN", 10)
+    failures: list = []
 
     for chunk_num, chunk in enumerate(chunks, 1):
         # Cooldown between chunks (except first)
@@ -568,8 +576,9 @@ async def translate_full_context(client: httpx.AsyncClient, chunks: list,
                 if attempt < retry_attempts:
                     await asyncio.sleep(retry_cooldown * attempt)
         else:
+            failures.append(chunk_num)
             log.chunk_fail(chunk_num, f"after {retry_attempts} attempts")
-            log.advance_progress()
+            log.update_progress(description=f"Translating ({len(failures)} failed)")
 
     return translated
 
@@ -635,6 +644,10 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
         batches = build_retry_batches(remaining, full_payload, context_lines=3)
         log.detail(f"    Split into {len(batches)} retry batch(es)")
 
+        # Retries get their own bar. Without one this phase, often the longest,
+        # showed no movement at all.
+        log.start_progress(f"Retry round {retry_round}/{max_retries}", total=len(batches))
+
         for batch_num, batch in enumerate(batches, 1):
             model = _get_model_for_attempt(retry_round + 1)
             log.detail(f"  RETRY {batch_num}/{len(batches)} - "
@@ -663,6 +676,10 @@ async def retry_missing(client: httpx.AsyncClient, missing_keys: set,
                     log.attempt(attempt, retry_attempts, "retry failed")
                 if attempt < retry_attempts:
                     await asyncio.sleep(retry_cooldown)
+
+            log.advance_progress()
+
+        log.finish_progress()
 
         if not remaining:
             log.success(f"  All lines recovered after {retry_round} retry round(s)!")
@@ -708,6 +725,9 @@ async def run_translation(chunks: list, payload: dict, api_key: str,
         missing = all_keys - set(translated.keys())
 
         if missing:
+            # Stop the chunk-phase bar before retries. Leaving a finished bar
+            # live freezes its elapsed clock and re-prints it on every log line.
+            log.finish_progress()
             def _recovered_progress(partial):
                 translated.update(partial)
                 _notify_progress(progress_callback, translated)

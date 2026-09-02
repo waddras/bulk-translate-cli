@@ -25,64 +25,18 @@ from pathlib import Path
 from .config import cfg, get_suffix_for_lang
 from .discover import group_by_directory
 from .logger import log
+from .prompts import (
+    Abort,
+    ask as _ask,
+    ask_choice as _ask_choice,
+    ask_optional_int as _ask_optional_int,
+    ask_yes_no as _ask_yes_no,
+    columns as _columns,
+    header as _header,
+    is_interactive,
+)
 
 DEFAULT_STYLE_SELECTION = "ALL,+karaoke"
-
-
-class Abort(Exception):
-    """Raised when the user cancels a prompt."""
-
-
-# ── Prompt helpers ────────────────────────────────────────────────────────────
-
-def _ask(question: str, default: str = "") -> str:
-    """Ask a free-text question. Empty input returns the default."""
-    suffix = f" [{default}]" if default else ""
-    try:
-        answer = input(f"{question}{suffix}: ").strip()
-    except EOFError:
-        raise Abort("input stream closed")
-    return answer or default
-
-
-def _ask_choice(question: str, choices: list, default: str) -> str:
-    """Ask until the answer is one of choices (case-insensitive)."""
-    options = "/".join(choices)
-    while True:
-        answer = _ask(f"{question} ({options})", default).lower()
-        if answer in choices:
-            return answer
-        print(f"  Please enter one of: {options}")
-
-
-def _ask_yes_no(question: str, default: bool = True) -> bool:
-    while True:
-        answer = _ask(question, "Y/n" if default else "y/N").lower()
-        if answer in ("y", "yes"):
-            return True
-        if answer in ("n", "no"):
-            return False
-        if answer in ("y/n", "y/n".upper()):
-            return default
-        print("  Please enter y or n")
-
-
-def _ask_optional_int(question: str, default_label: str, minimum: int = 1):
-    """Ask for a positive integer, or nothing to keep the default."""
-    while True:
-        answer = _ask(question, default_label)
-        if answer == default_label:
-            return None
-        if answer.isdigit() and int(answer) >= minimum:
-            return int(answer)
-        print(f"  Enter a number >= {minimum}, or press Enter for {default_label}")
-
-
-def _columns(entries: list, per_row: int = 3, width: int = 26) -> None:
-    """Print numbered entries in aligned columns."""
-    for start in range(0, len(entries), per_row):
-        row = entries[start:start + per_row]
-        print("  " + "".join(cell.ljust(width) for cell in row).rstrip())
 
 
 def _resolve_folder_selection(raw: str, count: int) -> list:
@@ -146,13 +100,6 @@ def _ask_folders(entries: list) -> list:
         if skipped:
             print(f"  Skipping: {', '.join(str(s) for s in skipped)}")
         return [entries[i - 1] for i in chosen]
-
-
-def _header(title: str) -> None:
-    """Section header on stdout, so prompts and headers stay in order."""
-    print("\n" + "=" * 60)
-    print(title)
-    print("=" * 60)
 
 
 # ── Track selection ───────────────────────────────────────────────────────────
@@ -382,7 +329,7 @@ def _print_summary(plans: list, force: bool, files_per_call, suffix: str) -> Non
 
 def run_interactive(path: str | None = None) -> None:
     """Guided translation: prompt per directory, then translate each one."""
-    if not sys.stdin.isatty():
+    if not is_interactive():
         log.error("Interactive mode needs a terminal. Use 'btcli translate' for scripts.")
         return
 
@@ -467,10 +414,11 @@ def _run(path: str | None) -> None:
 
     from .translate import run_translate
 
+    results = []
     for index, plan in enumerate(plans, 1):
         _header(f"RUN {index}/{len(plans)} - {plan['dir'].name or plan['dir']}")
         try:
-            run_translate(
+            outcome = run_translate(
                 path=str(plan["dir"]),
                 lang=target_lang,
                 input_type=plan["mode"],
@@ -481,10 +429,17 @@ def _run(path: str | None) -> None:
                 files_per_call=files_per_call,
                 preset_files=[str(f) for f in plan["files"]],
             )
+            if outcome:
+                results.append(outcome)
         except KeyboardInterrupt:
             print()
-            log.warning("Interrupted. Completed files are already written.")
+            log.warning("Interrupted. Translated lines are cached; re-run to continue.")
             return
         except Exception as exc:
             log.error(f"{plan['dir'].name or plan['dir']} failed: {exc}")
             continue
+
+    # One retry offer covering every folder, after they have all been processed.
+    from .retry import offer_retry, total_missing
+    if total_missing(results):
+        offer_retry(results, api_key="")
