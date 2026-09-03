@@ -84,11 +84,13 @@ RESUME AND THE TRANSLATION CACHE (.btcli-cache.json)
   finish, not 500. Keyed by source text, so renaming files, reordering cues, or
   re-extracting a track cannot corrupt it. Use --no-cache to translate fresh.
 
-  When a cache is found you are asked once per run whether to resume or start
-  over, and the cache state is always reported in Phase 1 so it is never a
-  mystery whether resuming is in effect. Set RESUME_PROMPT false to always
-  resume without asking; the question is skipped automatically when not run
-  from a terminal.
+  When an EARLIER run's lines are found you are asked once whether to resume or
+  start over, and the cache state is always reported in Phase 1 so it is never
+  a mystery whether resuming is in effect. Lines this run just translated are
+  reused without asking, and nothing is asked once translating has begun, so an
+  unattended job cannot stall waiting for an answer. Declining re-translates the
+  earlier lines only. Set RESUME_PROMPT false to always resume without asking;
+  the question is skipped automatically when not run from a terminal.
 
   Seasons of one series share the cache, so repeated lines (openings, endings,
   catchphrases) are only ever translated once.

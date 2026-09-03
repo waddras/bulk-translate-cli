@@ -226,10 +226,18 @@ A re-run therefore only sends what is still missing. Interrupt a job with
 Ctrl-C, or lose it to a rate limit, and starting it again picks up where it
 stopped.
 
-When a cache is found, btcli asks whether to resume or start fresh (once per
-run). Set `RESUME_PROMPT` to `false` to always resume silently; the prompt is
-skipped automatically when not running in a terminal. `USE_TRANSLATION_CACHE`
-turns the whole mechanism off, as does `--no-cache` for a single run.
+When lines cached by an **earlier** run are found, btcli asks once whether to
+resume or start fresh. It never asks about lines the current run translated
+minutes ago — seasons share a cache, so season 1 fills it and season 2 would
+otherwise be interrupted to ask permission to reuse the same run's own work. Nor
+does it ask once chunks have started going out: a job already under way silently
+resumes rather than stalling on a keypress nobody is there to press.
+
+Declining re-translates the lines from earlier runs and keeps what the current
+run has already paid for. Set `RESUME_PROMPT` to `false` to always resume
+silently; the prompt is skipped automatically when not running in a terminal.
+`USE_TRANSLATION_CACHE` turns the whole mechanism off, as does `--no-cache` for a
+single run.
 
 ### When a few lines refuse to translate
 

@@ -1,6 +1,8 @@
 # btcli — project state
 
-Paste this into a new chat as context. Current as of commit `6b477b9` on `main`.
+Paste this into a new chat as context. Describes `main`; no commit hash, because
+a doc cannot name the commit that contains it and the reference always went
+stale. Use `git log --oneline -5` for where `main` actually is.
 
 ## What this is
 
@@ -21,8 +23,8 @@ Only this repo is relevant. The `waddras/bulk-translate` web-UI repo is retired.
 
 ## State
 
-`main` = 29 commits, all work merged, nothing outstanding unpushed.
-329 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
+`main` = all work merged, nothing outstanding unpushed.
+335 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
 help-page render, wheel build + entry-point check.
 
 Every module carries a docstring explaining what the file does and how it flows;
@@ -87,6 +89,11 @@ reordering cannot corrupt it. `series_root_for()` maps a `Season NN` folder to
 its parent, so **all seasons of a series share one cache**. Written as each
 response arrives, so an interrupted run loses nothing.
 
+Because it is shared and grows during the run, "the cache holds this line" is
+**not** the same question as "an earlier run translated this line". The
+first-open snapshot (`cache._snapshots`, `from_earlier_run()`) answers the
+second, and anything user-facing must use it — see recently-fixed item 1.
+
 **Manifest.** `.btcli.json` per directory; records track/styles chosen and what
 was extracted. Reuse requires both a manifest record *and* the file still
 existing on disk. `--force` ignores it.
@@ -103,34 +110,44 @@ comments survive, write a `.bak`, and refuse to produce an unparseable file.
 `EMBED_FONT: true`. Verified all 7 model names exist against
 `GET /v1beta/models`.
 
-Nothing has ever been verified against the live API by tests — all 329 use a
+Nothing has ever been verified against the live API by tests — all 335 use a
 fake translator. Real-world confidence comes only from actual runs.
 
+## Recently fixed
+
+### 1. Resume prompt fired mid-run — FIXED
+
+The prompt appeared during season 2 of a 3-season job, stalling an unattended
+run on a keypress, and claimed the lines came from "an earlier run" when they
+were this run's own work from minutes earlier.
+
+Cause: `_resume_choice` latched only when `_ask_resume` was actually *called*,
+and it was only called when `cached_hits` was non-empty. A fresh series' season 1
+found an empty cache, so it never asked and never latched; it then filled the
+shared cache, and season 2's common lines ("Yes.", "Thank you.") triggered the
+prompt mid-run.
+
+Fixed with two guards, since the snapshot alone left a hole:
+
+- **First-open snapshot** (`cache.py`). `_snapshots` records the key set each
+  cache file held the first time the process opened it, and never refreshes it.
+  `from_earlier_run()` is what the prompt consults, so a run can no longer
+  mistake its own work for an earlier run's.
+- **Work-started latch** (`translate.py`). `mark_work_started()` fires when the
+  first chunk is dispatched, after which the prompt is skipped and reuse
+  assumed. Needed because a genuine re-run whose first batch happens to be
+  all-new lines would otherwise still reach the question at batch 2, with the
+  run committed and nobody watching.
+
+Also changed: declining now re-translates only the lines from earlier runs and
+keeps what the current run has paid for — it used to re-send everything,
+spending quota twice within one job.
+
+Note for future changes: `_resolve_cache` runs **per batch** (`FILES_PER_BATCH`,
+25) and interactive mode loops `run_translate` per folder, so anything that
+prompts from there can fire long after the run began.
+
 ## Open items
-
-### 1. Resume prompt fires mid-run (bug, agreed fix: option C)
-
-Translating 3 seasons, the resume prompt appeared during season 2.
-
-Cause: `_resume_choice` in `translate.py` latches only when `_ask_resume` is
-actually *called*, and it is only called when `cached_hits` is non-empty.
-On a fresh series season 1 has an empty cache, so it never asks and never
-latches. Season 1 then writes into the shared cache; season 2 finds its common
-lines ("Yes.", "Thank you.") and prompts — mid-run. The message is also false:
-it says "translated in an earlier run" when it was this run, minutes ago.
-
-Severity: a long unattended run **stalls waiting for a keypress**.
-
-Reproduced: two seasons under one show, season 1 → 0 prompts, season 2 → 1
-prompt (`cached: 3, missing: 1`).
-
-Agreed fix (**C**): snapshot the cache keys the first time the file is opened in
-the process, and only prompt about hits inside that snapshot. Makes "cached from
-an earlier run" literally true and cannot fire mid-run. Regression test: two
-seasons sharing a cache — zero prompts on a fresh series, exactly one on a real
-re-run.
-
-Workaround today: `RESUME_PROMPT: false`.
 
 ### 2. "not written because 0 unique line(s) remain untranslated" (bug)
 
