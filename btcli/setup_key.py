@@ -1,4 +1,19 @@
-"""First-use API key setup prompt."""
+"""First-run API key setup.
+
+Called when a command needs the API and no key is configured. Rather than
+failing with "no key", it explains where a key goes and offers to create the
+file, so a fresh install is usable without reading the README first.
+
+Resolution order (see also ``config.load_settings``):
+    1. the GEMINI_API_KEY environment variable
+    2. the file named by GEMINI_API_KEY_FILE, default ~/.btcli.env
+    3. this prompt
+
+The key is written to a file rather than into settings.conf, so the config stays
+safe to share or commit while the secret does not.
+
+A dry run never gets here — it makes no requests, so it needs no key.
+"""
 from __future__ import annotations
 
 import os

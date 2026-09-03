@@ -64,6 +64,10 @@ class _StyleConfig:
     """Internal helper to resolve style configuration."""
 
     def __init__(self, translate, passthrough, has_all, has_plus_all, has_plus_karaoke):
+        """Parsed -s selection. The has_* flags are wildcards that cannot be
+        expanded until the real style names are known, so they are carried
+        separately and resolved later against the files.
+        """
         self.translate = translate
         self.passthrough = passthrough
         self.has_all = has_all

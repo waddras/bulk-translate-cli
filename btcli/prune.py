@@ -24,6 +24,11 @@ _SKIP = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 
 
 def _size(path: Path) -> int:
+    """File size, or 0 if it cannot be read.
+
+    Pruning reports sizes across many folders; a permission error on one should
+    not abort the report.
+    """
     try:
         return path.stat().st_size
     except OSError:
@@ -31,6 +36,7 @@ def _size(path: Path) -> int:
 
 
 def _kilobytes(size: int) -> str:
+    """Size as KB. State files are small; KB throughout is easier to compare."""
     return f"{size / 1024:.1f} KB"
 
 

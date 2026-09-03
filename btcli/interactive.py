@@ -113,6 +113,11 @@ def _ask_folders(entries: list):
 # ── Track selection ───────────────────────────────────────────────────────────
 
 def _show_tracks(tracks: list, bitmap_codecs: set) -> None:
+    """List a video's subtitle tracks, marking those that cannot be translated.
+
+    Bitmap tracks (PGS, DVD, DVB) are images, not text, so they are shown but
+    flagged — otherwise picking one looks valid and fails later.
+    """
     print("  Tracks:")
     for track in tracks:
         codec = track.get("codec", "?")
@@ -346,6 +351,11 @@ def _plan_subtitle_directory(directory: Path, subtitles: list):
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 def _print_summary(plans: list, force: bool, files_per_call, suffix: str) -> None:
+    """Show every folder's plan before anything is sent.
+
+    The last checkpoint before quota is spent, and the point at which a folder
+    can still be edited or dropped.
+    """
     from .prompts import HEADING, ITEM, paint
     _header(f"PLAN - {len(plans)} folder(s)")
     for plan in plans:

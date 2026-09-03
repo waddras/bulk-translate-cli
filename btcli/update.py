@@ -86,6 +86,9 @@ def local_changes(repo: Path) -> list[str]:
 
 
 def _remote_exists(repo: Path, ref: str) -> bool:
+    """Whether a ref resolves locally. Used for both remote-tracking and
+    local branch names, so a caller can tell "needs creating" from "exists".
+    """
     try:
         _git(repo, "rev-parse", "--verify", "--quiet", ref)
         return True
@@ -484,6 +487,13 @@ def _run_dedupe() -> None:
 
 
 def _run_update(branch: str | None, check: bool, stash: bool) -> None:
+    """The update itself. Raises UpdateError, which run_update turns into a message.
+
+    Order is deliberate: locate the checkout, work out the target branch, fetch,
+    then decide whether a fast-forward is even possible before touching
+    anything. Local commits and uncommitted edits are both refused here rather
+    than part-way through.
+    """
     repo = find_repo()
     log.info(f"Install: {repo}")
 
@@ -629,10 +639,16 @@ def _report_check(target: str, switching: bool, behind: str, ahead: str,
 
 
 def _settings_path(repo: Path) -> Path:
+    """The user's config inside the checkout. Never overwritten, only merged."""
     return repo / "settings.conf"
 
 
 def _default_path(repo: Path) -> Path:
+    """The shipped defaults, preferring the checkout being updated.
+
+    Falls back to the configured install dir so this still works when the
+    checkout is somewhere other than /opt/btcli.
+    """
     shipped = repo / "settings.default.conf"
     return shipped if shipped.exists() else _DEFAULT_SETTINGS_FILE
 

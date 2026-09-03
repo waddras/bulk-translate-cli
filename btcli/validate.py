@@ -63,6 +63,7 @@ _NON_NEGATIVE = ("PARALLEL_COOLDOWN", "RETRY_COOLDOWN", "PARTIAL_LINE_TOLERANCE"
 
 
 def _type_name(expected) -> str:
+    """A Python type as words, so messages read as advice not as a stack trace."""
     return {str: "text", int: "a whole number", bool: "true or false",
             list: "a list", dict: "an object"}.get(expected, str(expected))
 
@@ -217,6 +218,11 @@ def find_duplicate_keys(raw: str) -> list:
     duplicates: list = []
 
     def collect(pairs):
+        """object_pairs_hook: sees every key before JSON collapses duplicates.
+
+        Called for each object, so nested duplicates are caught too. Returns a
+        plain dict, leaving normal parsing behaviour intact.
+        """
         keys = [key for key, _ in pairs]
         for key in keys:
             if keys.count(key) > 1 and key not in duplicates:

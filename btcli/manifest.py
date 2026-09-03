@@ -230,6 +230,11 @@ class ManifestRun:
     """
 
     def __init__(self, command: dict):
+        """Start a run. No manifest is touched until register_files is called.
+
+        *command* is the settings this run used; it is recorded into each job so
+        the record explains how its output was produced.
+        """
         # Copied, because update_command mutates it as the run learns more and
         # the caller's dict should not change underneath them.
         self.command = dict(command)

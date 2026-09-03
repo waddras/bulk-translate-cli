@@ -858,6 +858,12 @@ async def run_translation(chunks: list, payload: dict, api_key: str,
             # live freezes its elapsed clock and re-prints it on every log line.
             log.finish_progress()
             def _recovered_progress(partial):
+                """Forward lines recovered during retries, merged into the whole.
+
+                The caller expects the full picture each time, not just the
+                delta, so files completed by a recovered line are written at
+                once rather than waiting for the retry phase to end.
+                """
                 translated.update(partial)
                 _notify_progress(progress_callback, translated)
 

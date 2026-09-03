@@ -1,16 +1,35 @@
 #!/usr/bin/env python3
-"""CLI entry point for bulk-translate-cli.
+"""CLI entry point: argument parsing, help text, and dispatch.
 
-Subcommands:
-    btcli probe     — inspect files for subtitle tracks, styles, tags
-    btcli translate — full translation pipeline
-    btcli fix       — re-process translated files without API calls
-    btcli update    — pull latest code + merge new settings
+SUBCOMMANDS
+    btcli interactive — guided mode: pick track and styles per folder
+    btcli probe       — inspect files for subtitle tracks, styles, tags
+    btcli translate   — full translation pipeline
+    btcli fix         — re-process translated files without API calls
+    btcli prune       — report and reclaim stale cache and job records
+    btcli update      — pull latest code, merge or repair settings
 
 Verbosity flags are global and must appear BEFORE the subcommand:
     --quiet    minimal output (timestamps + summaries only)
     --verbose  full output (debug details, per-attempt logs)
     (default)  medium output (rich progress bars, colored, ETA)
+
+WHY THIS FILE IS MOSTLY TEXT
+    Roughly two thirds of it is help text held in ``*_EPILOG`` constants. That is
+    deliberate: ``--help`` is the reference users actually reach for, so the
+    epilogs carry full explanations and worked examples rather than one-line
+    summaries. ``tests/test_docs.py`` checks that every subcommand, fix and
+    documented flag really exists, so this text cannot drift away from the code.
+
+    The no-command summary printed by a bare ``btcli`` is maintained separately
+    from the argparse help and is also covered by those tests.
+
+DISPATCH
+    Every branch imports its flow lazily. Startup would otherwise pull in
+    pysubs2, httpx and fonttools just to print ``--help``.
+
+    Settings are validated before any command runs, so a mistake surfaces up
+    front rather than as a confusing failure an hour into a job.
 """
 from __future__ import annotations
 
@@ -497,6 +516,12 @@ EXAMPLES
 
 
 def _parse_args():
+    """Build the parser and parse argv.
+
+    Global flags sit on the top-level parser, so they must precede the
+    subcommand. Each subparser carries a RawDescriptionHelpFormatter epilog,
+    which is why the help text keeps its layout.
+    """
     parser = argparse.ArgumentParser(
         prog="btcli",
         description="Bulk subtitle translation CLI — translate SRT/ASS subtitles "
@@ -668,6 +693,15 @@ def _parse_args():
 
 
 def main():
+    """Configure logging, validate settings, then dispatch to a flow.
+
+    Order matters: verbosity is applied before anything can log, and settings are
+    validated before any command runs. Errors always block; warnings block only
+    under --strict.
+
+    Exits 1 with the usage summary when no subcommand is given, so the shell sees
+    a failure rather than a silent success.
+    """
     args = _parse_args()
 
     # Configure logger

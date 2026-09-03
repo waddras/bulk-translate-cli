@@ -40,11 +40,23 @@ _MARKUP_RE = re.compile(
 
 
 def _strip_markup(msg: str) -> str:
+    """Remove rich markup tags, for plain output and the log file.
+
+    The same message is written to both a rich console and a plain file, so
+    markup has to be stripped rather than avoided.
+    """
     return _MARKUP_RE.sub("", msg)
 
 # ── Verbosity Levels ──────────────────────────────────────────────────────────
 
 class Level(Enum):
+    """How much to print. Ordered: MINIMAL < MEDIUM < FULL.
+
+    MEDIUM is the default and the only level with live progress bars. FULL adds
+    per-attempt and per-response detail, which is what to ask for when
+    diagnosing a translation problem.
+    """
+
     MINIMAL = "minimal"
     MEDIUM = "medium"
     FULL = "full"
@@ -56,6 +68,12 @@ class Logger:
     """Singleton-style logger with 3 verbosity modes."""
 
     def __init__(self):
+        """Set safe defaults and work out whether rich is usable.
+
+        Availability is probed here, at import, because the alternative is
+        discovering it when the progress bar starts — by which point the run is
+        under way and falling back to plain output is no longer a clean choice.
+        """
         self._level = Level.MEDIUM
         self._start_time: float = 0.0
         self._log_file: Path | None = None

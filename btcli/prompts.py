@@ -25,6 +25,7 @@ class _Back:
     __slots__ = ()
 
     def __repr__(self) -> str:
+        """Readable in tracebacks and test failures, where "BACK" beats an id."""
         return "BACK"
 
 
@@ -33,6 +34,11 @@ BACK_WORDS = ("b", "back")
 
 
 def _wants_back(answer: str, allow_back: bool) -> bool:
+    """True when the user typed "b" or "back" and this prompt permits it.
+
+    Gated on allow_back so a prompt with nowhere to go back to treats "b" as
+    ordinary input rather than silently doing nothing.
+    """
     return allow_back and answer.strip().lower() in BACK_WORDS
 
 
