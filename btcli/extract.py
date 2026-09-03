@@ -22,7 +22,18 @@ from .logger import log
 def probe_tracks(filepath: str) -> list:
     """Probe a video file and return its subtitle tracks.
 
-    Returns list of dicts: [{index, stream_index, codec, language, title}, ...]
+    Returns list of dicts:
+        [{index, stream_index, codec, language, title, tags, disposition}, ...]
+
+    ``tags`` and ``disposition`` are ffprobe's own maps, passed through whole.
+    They exist for ``classify.py``, which hands the metadata to a model and so
+    benefits from everything the container declares — ``disposition.forced`` in
+    particular is the clearest marker of a signs-and-songs track, and titles are
+    routinely the only thing distinguishing two otherwise identical tracks.
+
+    ``language`` and ``title`` stay as flattened convenience copies because
+    ``auto.py``, ``probe.py`` and the interactive track list all read them
+    directly.
     """
     cmd = [
         "ffprobe", "-v", "quiet",
@@ -38,12 +49,16 @@ def probe_tracks(filepath: str) -> list:
     data = json.loads(result.stdout)
     tracks = []
     for i, stream in enumerate(data.get("streams", [])):
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
         tracks.append({
             "index": i,
             "stream_index": stream.get("index"),
             "codec": stream.get("codec_name", "unknown"),
-            "language": stream.get("tags", {}).get("language", "und"),
-            "title": stream.get("tags", {}).get("title", ""),
+            "language": tags.get("language", "und"),
+            "title": tags.get("title", ""),
+            "tags": dict(tags),
+            "disposition": dict(disposition),
         })
     return tracks
 

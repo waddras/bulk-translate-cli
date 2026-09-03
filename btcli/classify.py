@@ -17,21 +17,31 @@ WHAT MAKES THE JUDGEMENT POSSIBLE
     styles, because styles only exist once a track is chosen — that is why the
     track and the styles have to be decided by the same call rather than two.
 
-STYLES ARE NUMBERED, AND THE MODEL ANSWERS IN NUMBERS
-    ``enumerate_styles`` numbers every (track, style) pair once, globally from 1,
-    and that single numbering is what the payload carries, what the user is shown
-    before the call, and what the reply is validated against.
+THE TRACK IS THE FIRST DECISION, NOT A SIDE EFFECT
+    Choosing the track matters more than choosing styles: pick "Signs & Songs"
+    over "Full Subtitles" and everything downstream is wrong no matter which
+    styles were kept. So the reply names a ``track`` explicitly, and the styles
+    are read as belonging to it.
 
-    Answering with a number rather than a name removes the entire class of
-    name errors: no case slips, no reformatted ``Nodame Insert JP``, no invented
-    ``MainDialogue``. A number is either in range or it is not, which is a far
-    tighter check than string matching.
+    That is why EVERY text track is offered, including one with no ASS styles at
+    all. A plain-text track is a perfectly good answer — it just means translate
+    all of it — and excluding it would hide the right track whenever the wrong
+    one happened to be the only styled one.
 
-    Numbering globally also means a number identifies the TRACK as well as the
-    style, so there is no separate track field in the reply that could disagree
-    with the styles chosen. If a reply spans two tracks the track owning most of
-    the numbers wins and the strays are dropped — that narrows the selection,
-    never widens it.
+    Track metadata is passed through as ffprobe gave it, tags and disposition
+    included. ``disposition.forced`` is the clearest signal a track is signs
+    only, and a title like "Signs & Songs" says plainly what a track is for.
+
+STYLES ARE NUMBERED PER TRACK, AND THE MODEL ANSWERS IN NUMBERS
+    ``enumerate_styles`` numbers each track's styles from 1, and that single
+    numbering is what the payload carries, what the user is shown before the
+    call, and what the reply is validated against.
+
+    Numbers are scoped to the chosen track, so ``track`` stays authoritative and
+    cannot be contradicted by them: a number is simply valid for that track or
+    not. Answering with a number rather than a name also removes the entire class
+    of name errors — no case slips, no reformatted ``Nodame Insert JP``, no
+    invented ``MainDialogue``.
 
 WHAT THIS MODULE DELIBERATELY DOES NOT DO
     * **No pacing.** ``ai.pace_requests`` would stall the interactive
@@ -50,10 +60,10 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO
       user's quota on signs and karaoke.
 
 VALIDATION
-    Same discipline as the translation IDs in ``ai._normalize_result``: every
-    number must be one that was offered. Anything else is dropped and logged, and
-    a reply with nothing valid left is discarded whole. The model proposes; it
-    does not get to introduce anything.
+    Same discipline as the translation IDs in ``ai._normalize_result``: the track
+    must be one that was offered, and every style number must be valid for that
+    track. Anything else is dropped and logged, and a reply naming no real track
+    is discarded whole. The model proposes; it does not get to introduce anything.
 
 FLOW
     ``style_facts(path)``        evidence for one subtitle file, pure pysubs2
@@ -158,27 +168,29 @@ def style_facts(path) -> list:
 def usable_candidates(candidates: list) -> list:
     """The candidates that will actually be sent, in order.
 
+    Only the count is capped. A track with no styles is kept, because it is still
+    a valid answer to "which track" — see the module docstring.
+
     Callers must display and validate against THIS list, not the raw one, or the
     numbers a user is shown would not be the numbers the model was given.
     """
-    return [c for c in candidates if c.get("styles")][:MAX_TRACK_CANDIDATES]
+    return list(candidates)[:MAX_TRACK_CANDIDATES]
 
 
 def enumerate_styles(candidates: list) -> list:
-    """Number every (track, style) pair once, globally, from 1.
+    """Number each track's styles from 1.
 
     A pure function of *candidates*, so the payload, the list shown to the user
     and the reply check all derive the same numbering without passing it around.
 
-    Returns [{number, candidate, track, name, fact}], where *candidate* is the
-    position in the candidate list and *track* is the real track index (or None
-    for subtitle files, which have no track).
+    Numbers restart per track, so they are only meaningful together with the
+    track the reply names. Returns [{number, candidate, track, name, fact}].
     """
     entries = []
     for position, candidate in enumerate(candidates):
-        for fact in candidate.get("styles", []):
+        for offset, fact in enumerate(candidate.get("styles", []), start=1):
             entries.append({
-                "number": len(entries) + 1,
+                "number": offset,
                 "candidate": position,
                 "track": candidate.get("index"),
                 "name": fact["name"],
@@ -188,14 +200,16 @@ def enumerate_styles(candidates: list) -> list:
 
 
 def _verdict_schema() -> dict:
-    """Schema pinning the reply to one verdict object of style NUMBERS.
+    """Schema pinning the reply to a chosen track plus its style numbers.
 
-    There is no track field: a number identifies the track as well as the style,
-    so a separate field could only ever contradict the numbers chosen.
+    ``track`` leads because it is the more consequential choice. It is not
+    required, so that a folder of subtitle files — which has no track — does not
+    invite an invented value.
     """
     return {
         "type": "OBJECT",
         "properties": {
+            "track": {"type": "INTEGER"},
             "dialogue_styles": {"type": "ARRAY", "items": {"type": "INTEGER"}},
             "reason": {"type": "STRING"},
         },
@@ -224,48 +238,72 @@ def _output_contract(multi_track: bool) -> str:
     so that a hand-edited AI_SELECT_PROMPT cannot change the reply shape and
     break parsing. The instruction says what to choose; this says how to answer.
     """
-    track_rule = (
-        "- Every number you return MUST belong to the SAME track.\n"
-        if multi_track else ""
-    )
+    if multi_track:
+        head = (
+            "- FIRST choose the track. Set track to the index of the ONE track that\n"
+            "  carries the spoken dialogue. This is the most important decision: a\n"
+            "  signs-and-songs track holds no dialogue at all, whatever its styles.\n"
+            "  Use the track's title, language and disposition as well as its styles.\n"
+            "- THEN choose styles from THAT track only, using its own numbering.\n"
+        )
+    else:
+        head = "- Omit track. These are subtitle files, so there is no track to choose.\n"
     return (
         "BTCLI OUTPUT CONTRACT (this overrides any earlier output-format wording):\n"
-        "- Return a single JSON object with exactly two fields: dialogue_styles and reason.\n"
-        "- dialogue_styles is a list of the NUMBERS (the \"n\" field) of the styles that\n"
-        "  carry spoken dialogue. Return numbers, never names.\n"
-        "- Every number must be one that appears in the evidence below. Never invent one.\n"
-        + track_rule +
-        "- Return an empty list if none of the styles carries dialogue.\n"
+        "- Return a single JSON object with the fields: track, dialogue_styles, reason.\n"
+        + head +
+        "- dialogue_styles is a list of the NUMBERS (the \"n\" field) of the styles in the\n"
+        "  chosen track that carry spoken dialogue. Return numbers, never names.\n"
+        "- Style numbers restart at 1 for every track, so only use the numbers listed\n"
+        "  under the track you chose. Never invent a number.\n"
+        "- Return an empty list if the chosen track has no styles, or if none of its\n"
+        "  styles carries dialogue. An empty list means translate the whole track.\n"
         "- Do not include styles that only carry signs, titles, location captions,\n"
         "  letters, inserts, credits, opening or ending songs, or karaoke.\n"
-        "- reason is one short sentence explaining the choice.\n"
+        "- reason is one short sentence explaining the choice of track and styles.\n"
         "- Return JSON only, with no markdown or commentary around the object.\n"
     )
 
 
 def _payload(candidates: list) -> dict:
-    """The evidence, as the model receives it, carrying the shared numbering."""
+    """The evidence, as the model receives it, carrying the shared numbering.
+
+    Track metadata goes first in each entry and is passed through as ffprobe
+    reported it — tags and disposition included — because the track is the
+    decision that matters most and the container often states the answer
+    outright ("Signs & Songs", forced=1).
+    """
     entries = enumerate_styles(candidates)
     tracks = []
     for position, candidate in enumerate(candidates):
-        entry = {
-            "styles": [
-                {
-                    "n": item["number"],
-                    "name": item["name"],
-                    "cues": item["fact"]["cues"],
-                    "positioned": item["fact"]["positioned"],
-                    "karaoke": item["fact"]["karaoke"],
-                    "samples": item["fact"]["samples"],
-                }
-                for item in entries if item["candidate"] == position
-            ],
-        }
+        entry: dict = {}
         if candidate.get("index") is not None:
             entry["track"] = candidate["index"]
             entry["codec"] = candidate.get("codec", "")
             entry["language"] = candidate.get("language", "")
             entry["title"] = candidate.get("title", "")
+            if candidate.get("tags"):
+                entry["tags"] = candidate["tags"]
+            if candidate.get("disposition"):
+                entry["disposition"] = candidate["disposition"]
+
+        styles = [
+            {
+                "n": item["number"],
+                "name": item["name"],
+                "cues": item["fact"]["cues"],
+                "positioned": item["fact"]["positioned"],
+                "karaoke": item["fact"]["karaoke"],
+                "samples": item["fact"]["samples"],
+            }
+            for item in entries if item["candidate"] == position
+        ]
+        entry["styles"] = styles
+        if not styles:
+            # Said in words as well as by an empty list, so the model is not left
+            # inferring that a styleless track is a broken or ineligible one.
+            entry["note"] = ("plain text with no ASS styles; choosing this track "
+                             "means translating all of it")
         tracks.append(entry)
     return {"tracks": tracks}
 
@@ -343,36 +381,43 @@ def _accepted_entries(values, entries: list) -> list:
     return accepted
 
 
-def _one_track(accepted: list) -> list:
-    """Keep only the entries from a single track — the one with the most.
+def _pick_track(usable: list, value):
+    """The candidate position the reply chose, or None if it named no real track.
 
-    A reply mixing tracks cannot be honoured as given, since only one track gets
-    extracted. Dropping the minority narrows the selection; picking the union
-    would widen it into content the user did not ask to translate. Ties go to the
-    earliest track, so the choice is deterministic.
+    Refusing an unknown track index is the one place this must be strict: acting
+    on a track that does not exist would extract the wrong subtitles entirely.
+    With a single candidate there was no choice to make, so a missing or odd
+    value is taken as "the only one" rather than as an error.
     """
-    if not accepted:
-        return []
-    groups: dict = {}
-    for entry in accepted:
-        groups.setdefault(entry["candidate"], []).append(entry)
-    if len(groups) == 1:
-        return accepted
+    if not usable:
+        return None
+    indexed = [position for position, candidate in enumerate(usable)
+               if candidate.get("index") is not None]
+    if not indexed:
+        return 0                      # subtitle files: no track to choose
+    if len(usable) == 1:
+        return 0
 
-    best = sorted(groups.items(), key=lambda item: (-len(item[1]), item[0]))[0][1]
-    dropped = [entry["number"] for entry in accepted if entry not in best]
-    log.detail(f"    Reply mixed tracks; keeping track {best[0]['track']} "
-               f"and dropping style number(s) {dropped}")
-    return best
+    number = _as_number(value)
+    if number is None:
+        log.detail("    Verdict named no track, and there was more than one")
+        return None
+    for position in indexed:
+        if usable[position]["index"] == number:
+            return position
+    log.detail(f"    Ignoring verdict for unknown track {value!r}")
+    return None
 
 
 def validate(result, candidates: list) -> dict | None:
     """Turn a raw reply into a verdict, or None if it cannot be trusted.
 
-    Returns {track, keep, passthrough, reason, styles}: *keep* is concrete style
-    names resolved from the numbers, *passthrough* is the "+ALL" sentinel meaning
-    everything else, and *styles* is the full style list of the chosen track, so
-    a cached verdict can later be checked against what is on disk.
+    The track is resolved first, then style numbers are read within it, matching
+    the order the contract asks for. Returns {track, keep, passthrough, reason,
+    styles}: *keep* is style names resolved from the numbers, or None when the
+    whole track is to be translated; *passthrough* is the "+ALL" sentinel meaning
+    everything else; *styles* is the chosen track's full style list, so a cached
+    verdict can later be checked against what is on disk.
     """
     verdict = _unwrap(result)
     if verdict is None:
@@ -380,21 +425,36 @@ def validate(result, candidates: list) -> dict | None:
         return None
 
     usable = usable_candidates(candidates)
-    entries = enumerate_styles(usable)
-    chosen = _one_track(_accepted_entries(verdict.get("dialogue_styles"), entries))
-    if not chosen:
-        log.detail("    Verdict selected no style number that was offered")
+    position = _pick_track(usable, verdict.get("track"))
+    if position is None:
         return None
 
-    candidate = usable[chosen[0]["candidate"]]
+    candidate = usable[position]
+    available = [fact["name"] for fact in candidate.get("styles", [])]
     reason = verdict.get("reason")
-    return {
+    base = {
         "track": candidate.get("index"),
-        "keep": [entry["name"] for entry in chosen],
-        "passthrough": [PASSTHROUGH_REST],
         "reason": reason.strip() if isinstance(reason, str) else "",
-        "styles": [fact["name"] for fact in candidate.get("styles", [])],
+        "styles": available,
     }
+
+    # Numbers are scoped to the chosen track, so only its entries are in play.
+    entries = [item for item in enumerate_styles(usable)
+               if item["candidate"] == position]
+    chosen = _accepted_entries(verdict.get("dialogue_styles"), entries)
+
+    if not chosen:
+        if available:
+            # The track is real but no style survived: that is not a selection,
+            # and translating everything would be a wider job than was asked for.
+            log.detail("    Verdict selected no style number offered for that track")
+            return None
+        # A track with no ASS styles at all: nothing to select, translate it whole.
+        return {**base, "keep": None, "passthrough": None}
+
+    return {**base,
+            "keep": [entry["name"] for entry in chosen],
+            "passthrough": [PASSTHROUGH_REST]}
 
 
 # ── The call ──────────────────────────────────────────────────────────────────
@@ -420,7 +480,7 @@ def choose(candidates: list, api_key: str, *, instruction: str = "",
     """
     usable = usable_candidates(candidates)
     if not usable:
-        log.detail("    No styles to classify")
+        log.detail("    No tracks to classify")
         return None
     if not api_key:
         log.detail("    No API key available for style selection")
@@ -428,9 +488,8 @@ def choose(candidates: list, api_key: str, *, instruction: str = "",
 
     model = selected_model()
     prompt = _build_prompt(usable, instruction, source_lang)
-    log.detail(f"    Asking {model} to choose from "
-               f"{sum(len(c['styles']) for c in usable)} style(s) "
-               f"across {len(usable)} track(s)")
+    log.detail(f"    Asking {model} to choose from {len(usable)} track(s) and "
+               f"{sum(len(c.get('styles') or []) for c in usable)} style(s)")
 
     try:
         result = asyncio.run(_request(prompt, api_key, model))
@@ -449,4 +508,7 @@ def choose(candidates: list, api_key: str, *, instruction: str = "",
 
 def describe(verdict: dict) -> str:
     """The verdict as a one-line style selection, for summaries and manifests."""
-    return ",".join(verdict.get("keep", [])) + f",{PASSTHROUGH_REST}"
+    keep = verdict.get("keep")
+    if not keep:
+        return "whole track (no ASS styles)"
+    return ",".join(keep) + f",{PASSTHROUGH_REST}"

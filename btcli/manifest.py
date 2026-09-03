@@ -226,6 +226,12 @@ def save_style_verdict(directory, verdict: dict) -> None:
     Written as its own top-level key, never into a job: jobs are append-only
     history, and this is current state that gets replaced.
     """
+    if not verdict.get("keep"):
+        # A whole-track verdict (a plain-text track with no styles) is not cached:
+        # the reuse check is style-based, so there would be nothing to invalidate
+        # it against. Re-asking costs one cheap call and keeps the invariant that
+        # a cached verdict always names styles.
+        return
     try:
         path = Path(directory)
         data = _load(path)

@@ -88,6 +88,17 @@ def _candidates():
     }]
 
 
+def _two_tracks():
+    """Two tracks whose style numbering therefore overlaps."""
+    def style(name, cues):
+        return {"name": name, "cues": cues, "positioned": False,
+                "karaoke": False, "samples": []}
+    return [
+        {"index": 0, "styles": [style("A", 9), style("B", 8)]},   # its 1, 2
+        {"index": 1, "styles": [style("C", 7)]},                 # its 1
+    ]
+
+
 def test_the_prompt_carries_the_evidence_and_the_contract():
     prompt = classify._build_prompt(_candidates(), "pick the dialogue", "english")
 
@@ -101,32 +112,53 @@ def test_the_prompt_carries_the_evidence_and_the_contract():
 def test_the_contract_demands_numbers_not_names():
     contract = classify._output_contract(multi_track=False)
     assert "Return numbers, never names" in contract
-    assert "Never invent one" in contract
+    assert "Never invent a number" in contract
 
 
-def test_the_contract_pins_replies_to_one_track_only_when_there_is_a_choice():
-    assert "SAME track" in classify._output_contract(multi_track=True)
-    assert "SAME track" not in classify._output_contract(multi_track=False)
+def test_the_contract_asks_for_the_track_first():
+    """Choosing the track matters more than choosing styles within it."""
+    contract = classify._output_contract(multi_track=True)
+    assert "FIRST choose the track" in contract
+    assert contract.index("FIRST choose the track") < contract.index("THEN choose styles")
+    assert "Omit track" in classify._output_contract(multi_track=False)
 
 
-def test_the_numbering_is_global_and_shared():
-    """The user is shown these numbers, so the payload must carry the same ones."""
-    two_tracks = [
-        {"index": 0, "styles": [{"name": "A", "cues": 9, "positioned": False,
-                                 "karaoke": False, "samples": []}]},
-        {"index": 1, "styles": [{"name": "B", "cues": 8, "positioned": False,
-                                 "karaoke": False, "samples": []},
-                                {"name": "C", "cues": 7, "positioned": False,
-                                 "karaoke": False, "samples": []}]},
-    ]
-    entries = classify.enumerate_styles(two_tracks)
+def test_the_numbering_restarts_for_every_track():
+    """Numbers are scoped to the track, so track cannot be contradicted by them."""
+    entries = classify.enumerate_styles(_two_tracks())
 
     assert [(e["number"], e["name"], e["track"]) for e in entries] == [
-        (1, "A", 0), (2, "B", 1), (3, "C", 1)]
+        (1, "A", 0), (2, "B", 0), (1, "C", 1)]
 
-    payload = classify._payload(two_tracks)
-    assert payload["tracks"][0]["styles"][0]["n"] == 1
-    assert payload["tracks"][1]["styles"][1]["n"] == 3, "same numbering as above"
+    payload = classify._payload(_two_tracks())
+    assert [s["n"] for s in payload["tracks"][0]["styles"]] == [1, 2]
+    assert [s["n"] for s in payload["tracks"][1]["styles"]] == [1], "restarts at 1"
+
+
+def test_track_metadata_is_passed_through_whole():
+    """disposition.forced is the clearest "signs only" marker there is."""
+    candidates = [{
+        "index": 2, "codec": "ass", "language": "eng", "title": "Signs & Songs",
+        "tags": {"language": "eng", "title": "Signs & Songs"},
+        "disposition": {"default": 0, "forced": 1},
+        "styles": [],
+    }]
+    track = classify._payload(candidates)["tracks"][0]
+
+    assert track["disposition"]["forced"] == 1
+    assert track["tags"]["title"] == "Signs & Songs"
+    # Metadata comes before styles, since the track is the leading decision.
+    assert list(track)[0] == "track"
+
+
+def test_a_styleless_track_is_offered_and_explained():
+    """A plain-text track is a valid answer to "which track", so it must be sent."""
+    candidates = [{"index": 0, "codec": "subrip", "language": "eng",
+                   "title": "English", "styles": []}]
+    assert classify.usable_candidates(candidates) == candidates
+    track = classify._payload(candidates)["tracks"][0]
+    assert track["styles"] == []
+    assert "translating all of it" in track["note"]
 
 
 def test_the_verdict_schema_is_not_the_translation_schema():
@@ -206,44 +238,57 @@ def test_subtitle_files_have_no_track():
     assert verdict["track"] is None
 
 
-# ── A reply spanning two tracks narrows, never widens ─────────────────────────
+# ── Choosing the track ────────────────────────────────────────────────────────
 
-def _two_tracks():
-    def style(name, cues):
-        return {"name": name, "cues": cues, "positioned": False,
-                "karaoke": False, "samples": []}
-    return [
-        {"index": 0, "styles": [style("A", 9), style("B", 8)]},   # numbers 1, 2
-        {"index": 1, "styles": [style("C", 7)]},                  # number 3
-    ]
-
-
-def test_a_reply_mixing_tracks_keeps_the_track_with_the_most():
-    """Only one track gets extracted, and the union would widen the selection."""
-    verdict = classify.validate({"dialogue_styles": [1, 2, 3]}, _two_tracks())
-    assert verdict["track"] == 0
-    assert verdict["keep"] == ["A", "B"], "the lone track-1 style is dropped"
-
-
-def test_a_tie_across_tracks_goes_to_the_earlier_track():
-    verdict = classify.validate({"dialogue_styles": [2, 3]}, _two_tracks())
-    assert verdict["track"] == 0
-    assert verdict["keep"] == ["B"]
-
-
-def test_a_number_from_the_second_track_selects_that_track():
-    verdict = classify.validate({"dialogue_styles": [3]}, _two_tracks())
+def test_the_named_track_is_the_one_used():
+    verdict = classify.validate({"track": 1, "dialogue_styles": [1]}, _two_tracks())
     assert verdict["track"] == 1
-    assert verdict["keep"] == ["C"]
+    assert verdict["keep"] == ["C"], "number 1 means track 1's first style"
     assert verdict["styles"] == ["C"], "cache check uses that track's styles"
 
 
-def test_candidates_without_styles_are_never_numbered():
-    """They are not sent, so numbering them would shift every other number."""
-    candidates = [{"index": 0, "styles": []}] + _two_tracks()
-    assert classify.usable_candidates(candidates) == _two_tracks()
-    verdict = classify.validate({"dialogue_styles": [1]}, candidates)
-    assert verdict["keep"] == ["A"]
+def test_the_same_number_means_a_different_style_per_track():
+    """Numbers restart per track, so the track decides what a number refers to."""
+    assert classify.validate({"track": 0, "dialogue_styles": [1]},
+                             _two_tracks())["keep"] == ["A"]
+    assert classify.validate({"track": 1, "dialogue_styles": [1]},
+                             _two_tracks())["keep"] == ["C"]
+
+
+def test_an_unknown_track_is_refused():
+    """Acting on a track that does not exist would extract the wrong subtitles."""
+    assert classify.validate({"track": 7, "dialogue_styles": [1]},
+                             _two_tracks()) is None
+
+
+def test_a_missing_track_is_refused_when_there_was_a_choice():
+    assert classify.validate({"dialogue_styles": [1]}, _two_tracks()) is None
+
+
+def test_a_missing_track_is_fine_when_there_was_only_one():
+    verdict = classify.validate({"dialogue_styles": [1]}, _two_tracks()[:1])
+    assert verdict["track"] == 0
+
+
+def test_a_number_from_another_track_is_dropped():
+    """Track 1 has one style, so 2 is out of range for it however valid elsewhere."""
+    verdict = classify.validate({"track": 1, "dialogue_styles": [1, 2]}, _two_tracks())
+    assert verdict["keep"] == ["C"]
+
+
+def test_a_styleless_track_means_translate_all_of_it():
+    candidates = [{"index": 0, "codec": "subrip", "styles": []}]
+    verdict = classify.validate({"track": 0, "dialogue_styles": []}, candidates)
+
+    assert verdict["track"] == 0
+    assert verdict["keep"] is None, "None already means 'no style filter' downstream"
+    assert verdict["passthrough"] is None
+
+
+def test_an_empty_selection_on_a_styled_track_is_still_refused():
+    """Falling back to the whole track would be a wider job than was asked for."""
+    assert classify.validate({"track": 0, "dialogue_styles": []},
+                             _two_tracks()) is None
 
 
 # ── The call ──────────────────────────────────────────────────────────────────

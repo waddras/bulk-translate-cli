@@ -26,7 +26,7 @@ Only this repo is relevant. The `waddras/bulk-translate` web-UI repo is retired.
 ## State
 
 `main` = all work merged, nothing outstanding unpushed.
-390 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
+396 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
 help-page render, wheel build + entry-point check.
 
 Every module carries a docstring explaining what the file does and how it flows;
@@ -113,7 +113,7 @@ comments survive, write a `.bak`, and refuse to produce an unparseable file.
 `EMBED_FONT: true`. Verified all 7 model names exist against
 `GET /v1beta/models`.
 
-Nothing has ever been verified against the live API by tests — all 390 use a
+Nothing has ever been verified against the live API by tests — all 396 use a
 fake translator or a stubbed selection call. Real-world confidence comes only
 from actual runs. **The style-selection prompt in particular has never had a
 real reply**: its validation is well covered, its prompt wording is not.
@@ -210,18 +210,32 @@ or `\k`. Cue count is the decisive signal. Track metadata comes too. Each
 **track** is a candidate with its own styles, because styles only exist once a
 track is chosen — that is why one call decides both rather than two.
 
-**Styles are numbered and the model answers in numbers.** `enumerate_styles()`
-numbers every (track, style) pair globally from 1, and that one numbering feeds
-the payload, the list shown to the user before the call, and the reply check —
-all derived from the same pure function so they cannot drift. Numbers remove the
-whole class of name errors (case slips, reformatted names, invented names) and
-make validation a range check instead of string matching. Numbering globally also
-means a number identifies the *track*, so there is no separate track field to
-contradict the styles chosen. A reply spanning tracks keeps the track owning most
-of the numbers, which narrows rather than widens.
+**The track is the first decision, not a side effect.** Picking "Signs & Songs"
+over "Full Subtitles" makes every style choice irrelevant, so the reply names a
+`track` explicitly and the styles are read within it. Every text track is
+offered, **including one with no ASS styles** — a plain-text track is a valid
+answer meaning "translate all of it", and excluding it would hide the right track
+whenever the wrong one was the only styled one. Track metadata is passed through
+as ffprobe gave it; `probe_tracks()` now also returns `tags` and `disposition`
+(additively — existing keys unchanged) because `disposition.forced` is the
+clearest signs-only marker available.
+
+**Styles are numbered per track and the model answers in numbers.**
+`enumerate_styles()` numbers each track's styles from 1, and that one numbering
+feeds the payload, the list shown to the user, and the reply check — all from the
+same pure function so they cannot drift. Per-track numbering keeps `track`
+authoritative: a number is valid for that track or it is not, so the two can
+never contradict each other. Numbers also remove the whole class of name errors.
 
 `usable_candidates()` must be applied before displaying, not just inside
 `choose()`, or the numbers a user sees would not be the numbers sent.
+
+An unknown track index is refused outright — acting on it would extract the wrong
+subtitles. An empty style list is accepted only for a track that genuinely has no
+styles; on a styled track it is refused, since falling back to the whole track
+would be a wider job than was asked for. A whole-track verdict is deliberately
+**not cached**, because the reuse check is style-based and there would be nothing
+to invalidate it against.
 
 Deliberate choices:
 - **Pinned model** (`AI_SELECT_MODEL`, default `gemini-3.5-flash-lite`) — chosen

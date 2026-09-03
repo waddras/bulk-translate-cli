@@ -271,20 +271,26 @@ def _video_candidates(video: Path, tracks: list) -> list:
                 target = str(Path(tmp) / "sample.ass")
                 extracted = extract_track(str(video), track["index"], target,
                                           force_srt=False)
-                if Path(extracted).suffix.lower() not in (".ass", ".ssa"):
-                    continue
-                facts = style_facts(extracted)
+                # A plain-text track yields no ASS styles, and is still a valid
+                # answer to "which track" — it just means translate all of it.
+                # Excluding it would hide the right track whenever the wrong one
+                # happened to be the only styled one.
+                facts = (style_facts(extracted)
+                         if Path(extracted).suffix.lower() in (".ass", ".ssa")
+                         else [])
         except Exception as exc:
+            # Not extractable now means not translatable later, so drop it.
             log.detail(f"    Could not sample track {track['index']}: {exc}")
             continue
-        if facts:
-            candidates.append({
-                "index": track["index"],
-                "codec": track.get("codec", ""),
-                "language": track.get("language", ""),
-                "title": track.get("title", ""),
-                "styles": facts,
-            })
+        candidates.append({
+            "index": track["index"],
+            "codec": track.get("codec", ""),
+            "language": track.get("language", ""),
+            "title": track.get("title", ""),
+            "tags": track.get("tags") or {},
+            "disposition": track.get("disposition") or {},
+            "styles": facts,
+        })
     return candidates
 
 
@@ -300,16 +306,20 @@ def _show_evidence(candidates: list) -> None:
     entries = enumerate_styles(candidates)
     for position, candidate in enumerate(candidates):
         mine = [entry for entry in entries if entry["candidate"] == position]
-        if not mine:
-            continue
         if candidate.get("index") is not None:
             label = (f"  Track {candidate['index']}  "
                      f"[{candidate.get('language') or 'und'}] "
                      f"{candidate.get('codec') or ''}").rstrip()
             if candidate.get("title"):
                 label += f'  "{candidate["title"]}"'
+            if candidate.get("disposition", {}).get("forced"):
+                label += "  (forced)"
             print(label)
-        _columns([f"{entry['number']}) {entry['name']}" for entry in mine])
+        if mine:
+            # Numbers restart per track, so they only mean anything under it.
+            _columns([f"{entry['number']}) {entry['name']}" for entry in mine])
+        else:
+            _hint("    plain text, no styles - choosing this track translates all of it")
 
 
 def _numbered(names: list, entries: list, track) -> str:
@@ -324,16 +334,29 @@ def _numbered(names: list, entries: list, track) -> str:
                      for name in names)
 
 
-def _show_verdict(verdict: dict, cached: bool, entries: list) -> None:
+def _show_verdict(verdict: dict, cached: bool, entries: list,
+                  tracks_offered: int = 1) -> None:
     """Print what was chosen, in enough detail to judge it."""
-    keep = verdict.get("keep", [])
-    total = len(verdict.get("styles", []))
-    others = max(0, total - len(keep))
+    keep = verdict.get("keep") or []
+    total = len(verdict.get("styles") or [])
+    track = verdict.get("track")
     source = "Cached selection" if cached else f"{verdict.get('model', 'Gemini')} chose"
-    where = "" if verdict.get("track") is None else f"track {verdict['track']} and "
-    print(f"  {source} {where}{len(keep)} of {total} style(s):")
-    _hint(f"    translate:   {_numbered(keep, entries, verdict.get('track'))}")
-    _hint(f"    passthrough: the other {others} style(s), untouched")
+
+    if track is None:
+        print(f"  {source} {len(keep)} of {total} style(s):")
+    elif tracks_offered > 1:
+        print(f"  {source} track {track}, and {len(keep)} of {total} style(s):")
+    else:
+        # Saying it "chose" a track it had no alternative to would overstate what
+        # happened: with one track the only real decision was the styles.
+        print(f"  {source} {len(keep)} of {total} style(s) "
+              f"on track {track} (the only one):")
+
+    if keep:
+        _hint(f"    translate:   {_numbered(keep, entries, track)}")
+        _hint(f"    passthrough: the other {max(0, total - len(keep))} style(s), untouched")
+    else:
+        _hint("    translate:   every line (this track has no ASS styles)")
     if verdict.get("reason"):
         _hint(f"    reason:      {verdict['reason']}")
 
@@ -382,7 +405,7 @@ def _try_ai_selection(directory: Path, candidates: list, ai: dict):
             _warn("  Gemini could not choose - falling back to the usual prompts.")
             return None
 
-    _show_verdict(verdict, cached is not None, entries)
+    _show_verdict(verdict, cached is not None, entries, len(usable))
     answer = _ask_yes_no("  Use this selection?", True, allow_back=True)
     if answer is BACK:
         return BACK
@@ -397,14 +420,20 @@ def _try_ai_selection(directory: Path, candidates: list, ai: dict):
 
 def _plan_from_verdict(directory: Path, mode: str, files: list,
                        verdict: dict) -> dict:
-    """Turn an accepted verdict into a plan, in the shape every plan has."""
+    """Turn an accepted verdict into a plan, in the shape every plan has.
+
+    keep of None is meaningful and passed through: it is what a chosen track with
+    no ASS styles means, and downstream it already stands for "translate it all".
+    """
     from .classify import describe
 
+    keep = verdict.get("keep")
+    passthrough = verdict.get("passthrough")
     return {"dir": directory, "mode": mode, "files": files,
             "track": verdict.get("track"),
             "styles_raw": f"AI: {describe(verdict)}",
-            "keep": list(verdict.get("keep", [])),
-            "passthrough": list(verdict.get("passthrough", []))}
+            "keep": list(keep) if keep else None,
+            "passthrough": list(passthrough) if passthrough else None}
 
 
 def _output_marker() -> str:

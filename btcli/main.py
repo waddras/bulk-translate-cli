@@ -420,27 +420,34 @@ LETTING GEMINI CHOOSE
   quota. Each style is judged on its cue count, a few sample lines, and whether
   its cues carry \\pos (a sign) or \\k (karaoke) - names alone are a weak signal.
 
-  The numbered style list is printed first, and it is the same numbering the
-  model receives, so its answer can be read straight against it. The model
-  replies with NUMBERS, not names, which rules out case slips, reformatted names
-  and invented ones - a number is either offered or it is not.
+  The TRACK is the first decision and the more consequential one: pick a
+  signs-and-songs track over the full subtitles and every style choice after it
+  is irrelevant. Every text track is offered, with its ffprobe metadata passed
+  through whole - tags and disposition included, since forced=1 is the clearest
+  "signs only" marker there is. A plain-text track with no ASS styles is offered
+  too; choosing it just means translating all of it.
 
-    Track 0  [eng] ass  "English"
-    1) Base01          2) Base01 - Overlap   3) EdEnglish     4) NodameOP
-    5) NodameED        6) Nodame Primary     7) letter1       8) sign1
+  Style numbers restart at 1 for each track, so they only mean anything with the
+  track named. The model replies with NUMBERS, not names, which rules out case
+  slips, reformatted names and invented ones.
+
+    Track 0  [eng] ass  "Signs & Songs"  (forced)
+    1) sign1           2) NodameOP
+    Track 1  [eng] ass  "Full Subtitles"
+    1) Base01          2) Base01 - Overlap   3) EdEnglish     4) Nodame Primary
     Asking Gemini to choose the track and styles...
-    gemini-3.5-flash-lite chose track 0 and 2 of 41 style(s):
-      translate:   1) Base01, 6) Nodame Primary
+    gemini-3.5-flash-lite chose track 1, and 2 of 41 style(s):
+      translate:   1) Base01, 4) Nodame Primary
       passthrough: the other 39 style(s), untouched
-      reason:      Base01 and Nodame Primary carry hundreds of conversational
-                   cues; the rest are positioned signs or karaoke.
+      reason:      Track 1 is the full subtitle track; Base01 and Nodame Primary
+                   carry hundreds of conversational cues.
     Use this selection? [Y/n]
 
-  Nothing is taken on trust: a number that was not offered is discarded, a reply
-  spanning two tracks keeps only the track most of its numbers belong to, and a
-  reply with nothing valid left is dropped rather than widened to "translate
-  everything". Answer n, or let the call fail, and you get the ordinary style
-  prompt with nothing lost.
+  Nothing is taken on trust: a track index that does not exist is refused, a
+  style number out of range for the chosen track is dropped, and a reply with
+  nothing valid left is discarded rather than widened to "translate everything".
+  Answer n, or let the call fail, and you get the ordinary style prompt with
+  nothing lost.
 
   The verdict is cached in that folder's .btcli.json and reused only while the
   styles on disk still match. A cached verdict still has to be confirmed, so

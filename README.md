@@ -117,35 +117,44 @@ Let Gemini choose the track and styles for you? [y/N]: y
 Instructions for Gemini [Enter for the default]:
 
   FOLDER - Season 01  (12 file(s))
-  Track 0  [eng] ass  "English"
-  1) Base01          2) Base01 - Overlap   3) EdEnglish      4) NodameOP
-  5) NodameED        6) Nodame Primary     7) letter1        8) sign1
+  Track 0  [eng] ass  "Signs & Songs"  (forced)
+  1) sign1           2) NodameOP
+  Track 1  [eng] ass  "Full Subtitles"
+  1) Base01          2) Base01 - Overlap   3) EdEnglish      4) Nodame Primary
   Asking Gemini to choose the track and styles...
-  gemini-3.5-flash-lite chose track 0 and 2 of 41 style(s):
-    translate:   1) Base01, 6) Nodame Primary
+  gemini-3.5-flash-lite chose track 1, and 2 of 41 style(s):
+    translate:   1) Base01, 4) Nodame Primary
     passthrough: the other 39 style(s), untouched
-    reason:      Base01 and Nodame Primary carry hundreds of conversational
-                 cues; the rest are positioned signs or karaoke.
+    reason:      Track 1 is the full subtitle track; Base01 and Nodame Primary
+                 carry hundreds of conversational cues.
   Use this selection? [Y/n]
 ```
 
-The numbered list is printed before the call, and it is the same numbering the
-model receives — so you can read its answer straight against it. The model
-replies with **numbers, not names**, which removes a whole class of errors: no
-case slips, no reformatted `Nodame Insert JP`, no invented `MainDialogue`. A
-number is either one that was offered or it is not.
+**The track is the first decision**, and the more consequential one: pick "Signs
+& Songs" over "Full Subtitles" and every style choice after it is irrelevant. So
+every text track is offered, with its ffprobe metadata passed through whole —
+tags and disposition included, since `forced=1` is the clearest "signs only"
+marker there is. A plain-text track with no ASS styles is offered too; choosing
+it just means translating all of it.
+
+Style numbers **restart at 1 for each track**, so they only mean anything
+together with the track named, and cannot contradict it. The model replies with
+**numbers, not names**, which removes a whole class of errors: no case slips, no
+reformatted `Nodame Insert JP`, no invented `MainDialogue`.
+
+The list you see is printed from the same numbering the model receives, so its
+answer reads straight against it. Cue counts, `\pos`/`\k` flags and sample lines
+go in the request but stay out of that list — they are what the model judges
+styles on, and clutter for a human checking the result.
 
 One extra API call per folder, on the model pinned by `AI_SELECT_MODEL` so it
-never spends a translation model's daily quota. Each style is judged on its cue
-count, sample lines, and whether its cues carry `\pos` or `\k` — names alone are
-a weak signal, so that detail goes in the request even though it is kept out of
-the list you see.
+never spends a translation model's daily quota.
 
-Nothing is taken on trust: a number that was not offered is discarded, a reply
-spanning two tracks keeps only the track most of its numbers belong to, and a
-reply with nothing valid left is dropped entirely rather than widened to
-"translate everything". Answer `n`, or let the call fail, and you get the normal
-style prompt with nothing lost.
+Nothing is taken on trust: a track index that does not exist is refused outright,
+a style number out of range for the chosen track is dropped, and a reply with
+nothing valid left is discarded rather than widened to "translate everything".
+Answer `n`, or let the call fail, and you get the normal style prompt with
+nothing lost.
 
 The verdict is cached in that folder's `.btcli.json` and reused only while the
 styles on disk still match, so a re-release with renamed styles gets a fresh
