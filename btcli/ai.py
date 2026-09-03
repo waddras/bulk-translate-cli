@@ -1,14 +1,53 @@
-"""Gemini API translation: chunked, multi_turn, and full_context modes.
+"""Talking to Gemini, and refusing to believe it without proof.
 
-Translation modes:
-  - chunked (default): independent chunks, parallel batches with cooldown
-  - multi_turn: full blob as system context, chunks as conversation turns
-  - full_context: full blob sent every request, only specific keys translated
+TRANSLATION MODES (``TRANSLATION_MODE``)
+    chunked       default. Independent chunks, sent in batches of
+                  PARALLEL_CHUNKS with a cooldown between batches. Cheapest,
+                  and a failure only affects its own chunk.
+    multi_turn    one conversation; each chunk is a turn, so earlier chunks
+                  stay in context. Better consistency, more tokens.
+    full_context  the whole blob accompanies every request, with only specific
+                  keys asked for. Best consistency, most expensive by far.
 
-Also handles:
-  - Cooldown timer between API calls
-  - Retry with context for missing keys
-  - Model pool cycling on retries
+THE VALIDATION THAT MATTERS
+    This module exists in its current shape because of a real corruption bug:
+    the model returned translations shifted by a few positions, under keys that
+    all looked correct, and everything downstream believed it. Subtitles were
+    silently attributed to the wrong cues.
+
+    The defence is doubled identity. Every payload item carries an inline
+    ``<BTCLI_ID:NNNNNN>`` token *inside its text* as well as an ``id`` field, and
+    ``_normalize_result`` accepts a translation only when the two agree, the ID
+    is one this chunk actually asked for, and it has not already been seen.
+    Anything else is dropped and re-requested individually.
+
+    A shifted response therefore fails to validate rather than being accepted,
+    which is the whole point. Do not relax these checks to reduce retries — that
+    trades a visible cost for an invisible one.
+
+    ``_output_contract`` states the required reply shape and says explicitly that
+    it overrides earlier wording, because it is appended after the user's
+    PROMPT_TEMPLATE, which may say something older and contradictory.
+
+THE MODEL LADDER
+    ``GEMINI_MODEL`` and ``MODEL_POOL`` merge into one de-duplicated ladder. A
+    failure moves to the next model immediately — a fresh model has its own
+    quota, so waiting on the one that just refused achieves nothing. Only once
+    the ladder has been walked does ``backoff_before_retry`` actually wait.
+    ``effective_attempts`` guarantees the ladder is never cut short by a low
+    RETRY_ATTEMPTS.
+
+PACING
+    One helper, ``pace_requests``, enforces PARALLEL_COOLDOWN for every mode. It
+    counts time already spent, so a call that took 40s of a 60s cooldown waits
+    20s rather than another 60. Uses a monotonic clock so a system clock change
+    cannot cause an hours-long wait.
+
+LINE BREAKS
+    Multi-line cues are protected by a ``<BTCLI_LB>`` sentinel rather than a raw
+    newline, which models reliably mangle. ``_restore_line_breaks`` puts them
+    back and, if the count changed anyway, rebuilds it from the source so two
+    cues can never merge into one.
 """
 from __future__ import annotations
 
@@ -67,6 +106,14 @@ def _response_schema() -> dict:
 
 
 def _output_contract(target_lang: str) -> str:
+    """The reply format btcli requires, appended after the user's prompt template.
+
+    Placed last and explicitly declared as overriding, because a user's
+    PROMPT_TEMPLATE may still carry older wording asking for a different shape.
+    Whatever the template says, this is what ``_normalize_result`` enforces, so
+    the template must not specify a shape of its own — ``validate.py`` warns when
+    it does.
+    """
     return (
         "BTCLI OUTPUT CONTRACT (this overrides any earlier output-format wording):\n"
         "- Return a JSON ARRAY. Each element is an object with exactly two fields: id and text.\n"
@@ -123,6 +170,15 @@ def _rebalance_line_breaks(text: str, source: str) -> str:
 
 
 def _restore_line_breaks(text: str, source: str) -> str:
+    """Turn the protected sentinels back into real newlines.
+
+    Accepts a literal ``\\N`` too, since models sometimes helpfully "correct" the
+    sentinel into ASS syntax.
+
+    If the line count still does not match the source, the text is rebalanced
+    locally rather than accepted as-is: a dropped break would merge two subtitle
+    lines into one, which is visible and wrong on screen.
+    """
     restored = text.replace(LINE_BREAK_SENTINEL, "\n").replace(r"\N", "\n")
     expected = source.count("\n")
     if restored.count("\n") == expected:
@@ -224,6 +280,12 @@ def _normalize_result(result, expected: dict) -> dict:
 
 
 def _notify_progress(callback, translated: dict) -> None:
+    """Hand results to the caller as they arrive, never letting it break the run.
+
+    The callback writes to the cache and generates finished files. If it raises,
+    the failure is logged and translation continues: losing an incremental write
+    is recoverable, but abandoning a part-finished API run wastes real quota.
+    """
     if callback:
         try:
             callback(translated)

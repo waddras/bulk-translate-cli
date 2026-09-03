@@ -1,13 +1,41 @@
-"""Translate flow orchestrator: ties the full pipeline together.
+"""The translate flow: ties the whole pipeline together.
 
-Pipeline:
-  1. Discover files (or receive pre-resolved list)
-  2. Extract tracks if input is video
-  3. Parse subtitles → build deduped blob
-  4. Split into chunks
-  5. Translate via Gemini API (mode from config)
-  6. Reassemble output files
-  7. Report results
+TWO LEVELS
+    ``run_translate`` prepares a run and is deliberately a readable summary of
+    the flow, with each step delegated to a helper above it. ``_translate_batch``
+    does the work for one batch of files. Everything else in this file is a named
+    step belonging to one of those two.
+
+WHAT A RUN DOES
+    1. resolve settings, open the job manifest, check the API key
+    2. resolve input files — discover subtitles, or extract them from video
+    3. resolve styles once for the whole run, so batches agree
+    4. split the files into batches and translate each
+    5. report, and hand back a result the caller can act on
+
+WHAT A BATCH DOES
+    1. build the deduplicated blob (``blob.build_blob``)
+    2. subtract what the cache already knows
+    3. split the remainder into chunks
+    4. send them, writing each file the moment its lines are all present
+    5. write or report whatever is still missing
+
+BATCHES vs CHUNKS — easy to confuse
+    A *batch* is a group of files (``FILES_PER_BATCH``) deduplicated together, so
+    lines shared between episodes are translated once. A *chunk* is one API
+    request within a batch (``MAX_LINES_PER_CHUNK``). Bigger batches dedupe
+    better but build a bigger blob; bigger chunks mean fewer requests but lose
+    more work when one fails.
+
+WRITTEN AS IT GOES
+    Nothing waits for the end. Translations are cached and files emitted as
+    responses arrive, so an interrupted run keeps everything it had finished, and
+    re-running it only sends what is genuinely missing.
+
+RETURN VALUE
+    A dict (see ``_build_result``) rather than a bool, because interactive mode
+    reuses it to offer a retry or a passthrough pass without asking every
+    question again.
 """
 from __future__ import annotations
 
@@ -133,6 +161,13 @@ def _detect_show_name(files: list) -> str:
 
 # Asked at most once per process: a series with many season folders should not
 # ask the same question for every folder.
+#
+# KNOWN BUG (docs/PROJECT-STATE.md, open item 1): this latches only when the
+# question is actually asked, and it is only asked when the cache has relevant
+# hits. On a fresh series the first season finds an empty cache, so nothing
+# latches; it then fills the shared cache, and the second season's common lines
+# trigger the prompt MID-RUN. Agreed fix is to compare against a snapshot of the
+# cache taken before the run started, so "translated in an earlier run" is true.
 _resume_choice: bool | None = None
 
 
@@ -232,6 +267,7 @@ def _resolve_api_key(dry_run: bool) -> str | None:
 
 def _log_run_header(path: str, input_type: str, suffix: str, force_srt: bool,
                     source_lang: str, target_lang: str, dry_run: bool) -> None:
+    """Announce what this run is about to do, before anything is touched."""
     log.sep()
     log.phase(f"{'DRY RUN' if dry_run else 'TRANSLATE'} - {source_lang} → {target_lang}")
     log.stat("Path", path)
@@ -384,6 +420,11 @@ def _preview_extraction(video_files: list, tracks: list, path: str) -> dict:
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
 def _report_files(files: list) -> None:
+    """List the resolved input files with their sizes.
+
+    Worth printing even when it is long: it is the last chance to notice that
+    discovery picked up the wrong thing before quota is spent.
+    """
     log.sep()
     log.phase(f"FILES - {len(files)} subtitle file(s)")
     for index, item in enumerate(files, 1):
@@ -424,6 +465,7 @@ def _resolve_styles(files: list, keep_styles: list | None,
 
 
 def _report_completion(completed: list, warnings: list, missing: dict) -> None:
+    """Final summary for the whole run, after every batch has finished."""
     log.sep()
     log.summary("Translation Complete", [
         ("Files written", str(len(completed))),

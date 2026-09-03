@@ -24,12 +24,31 @@ MAX_RECORDED_LINES = 50
 
 
 class BatchWriter:
-    """Decides when each output file may be written, and writes it."""
+    """Decides when each output file may be written, and writes it.
+
+    Usage during a batch:
+
+    * ``write_ready`` after every API response — emits any file now complete
+    * ``finalize`` once at the end — writes what the tolerance permits and
+      reports the rest
+    * ``completed``, ``warnings`` and ``emitted`` carry the outcome
+
+    Files are emitted as soon as they are ready rather than at the end, so a run
+    interrupted halfway leaves finished episodes on disk instead of nothing.
+    """
 
     def __init__(self, files: list, meta: dict, payload: dict, chunks: list, *,
                  suffix: str, force_srt: bool, keep_styles, passthrough_styles,
                  source_lang: str, target_lang: str, mode: str,
                  files_per_call, manifest_run=None):
+        """Precompute what each file needs, so readiness is a set comparison.
+
+        The indexes built here (``cues_by_file``, ``required_by_file``,
+        ``_chunk_keys``) are what make ``write_ready`` cheap enough to call after
+        every single response.
+
+        File indexes are 1-based throughout, matching the FF part of a blob tag.
+        """
         self.files = files
         self.meta = meta
         self.payload = payload
@@ -44,6 +63,8 @@ class BatchWriter:
         self.manifest_run = manifest_run
 
         # Which cues belong to each file, and the unique lines each file needs.
+        # "Required" is the set of *representative* tags, not cue tags: a file
+        # with fifty "Yes." cues needs that line translated once.
         self.cues_by_file = {index: [] for index in range(1, len(files) + 1)}
         for tag, item in meta.items():
             self.cues_by_file[item["file_idx"]].append((tag, item))
@@ -52,6 +73,8 @@ class BatchWriter:
             for index, cues in self.cues_by_file.items()
         }
 
+        # Kept for the manifest record, which reports how a file's lines were
+        # distributed across requests — useful when diagnosing which chunk failed.
         self.chunk_sizes = [len(chunk) for chunk in chunks]
         self._chunk_keys = [set(chunk) for chunk in chunks]
 
@@ -62,9 +85,15 @@ class BatchWriter:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _source(self, file_idx: int) -> Path:
+        """The source file for a 1-based blob file index."""
         return Path(self.files[file_idx - 1])
 
     def _recorded_lines(self, missing_keys) -> list:
+        """Untranslated source lines to store in the manifest, capped and ordered.
+
+        Sorted for a stable record, and truncated so a batch where a whole chunk
+        failed cannot bloat .btcli.json with thousands of lines.
+        """
         return [self.payload[key] for key in sorted(missing_keys)
                 if key in self.payload][:MAX_RECORDED_LINES]
 
