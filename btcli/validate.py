@@ -6,8 +6,18 @@ behaviour. The case that prompted this: GEMINI_MODEL repeated as MODEL_POOL[0]
 combined with a low RETRY_ATTEMPTS meant an entire job only ever reached two of
 seven configured models, and nothing said so.
 
-Problems are reported as either an error (the job cannot run correctly) or a
-warning (it will run, but not as intended).
+Findings come at three levels:
+
+* **error** — the job cannot run correctly. Always blocks.
+* **warning** — it will run, but not as intended. Blocks under ``--strict``.
+* **note** — worth knowing, but nothing to do. Never blocks, not even under
+  ``--strict``, and does not stop the config being called good.
+
+The third level exists because a warning that demands no action trains people
+to ignore warnings that do. The case in point: RETRY_ATTEMPTS lower than the
+number of distinct models used to warn on every single command, even though
+``ai.effective_attempts()`` already raises it unconditionally, so there was
+never anything for the user to fix — and ``--strict`` refused to run at all.
 """
 from __future__ import annotations
 
@@ -69,10 +79,14 @@ def _type_name(expected) -> str:
 
 
 def check_settings(settings: dict | None = None) -> tuple:
-    """Inspect settings and return (errors, warnings) as lists of strings."""
+    """Inspect settings and return (errors, warnings, notes) as lists of strings.
+
+    See the module docstring for what separates the three.
+    """
     conf = cfg if settings is None else settings
     errors: list = []
     warnings: list = []
+    notes: list = []
 
     # ── Types ────────────────────────────────────────────────────────────────
     for key, expected in _EXPECTED_TYPES.items():
@@ -132,10 +146,13 @@ def check_settings(settings: dict | None = None) -> tuple:
             attempts = conf.get("RETRY_ATTEMPTS")
             if isinstance(attempts, int) and not isinstance(attempts, bool) \
                     and 0 < attempts < distinct:
-                warnings.append(
+                # A note, not a warning: effective_attempts() has already
+                # corrected this by the time anything runs, so there is nothing
+                # to fix and no reason to block --strict.
+                notes.append(
                     f"RETRY_ATTEMPTS is {attempts} but there are {distinct} distinct "
                     f"models; attempts are raised to {distinct} automatically so "
-                    f"every model is tried")
+                    f"every model is tried. Nothing to change.")
         if not pool:
             warnings.append("MODEL_POOL is empty, so a failure has no fallback model")
 
@@ -202,7 +219,7 @@ def check_settings(settings: dict | None = None) -> tuple:
             if bad:
                 errors.append(f"{key} entries must start with a dot: {bad}")
 
-    return errors, warnings
+    return errors, warnings, notes
 
 
 def find_duplicate_keys(raw: str) -> list:
@@ -258,7 +275,8 @@ def report_settings(settings: dict | None = None, strict: bool = False,
                     announce_ok: bool = False) -> bool:
     """Log any problems. Returns False when the job should not start.
 
-    Errors always block. Warnings block only when strict is set.
+    Errors always block. Warnings block only when strict is set. Notes never
+    block and never withhold the all-clear, because there is nothing to act on.
 
     With announce_ok, also says so when nothing blocks — but distinguishes a
     clean config from one that merely has nothing fatal. Claiming a config
@@ -267,7 +285,7 @@ def report_settings(settings: dict | None = None, strict: bool = False,
     """
     from .logger import log
 
-    errors, warnings = check_settings(settings)
+    errors, warnings, notes = check_settings(settings)
 
     # Duplicates are invisible to check_settings, which only sees the parsed
     # dict — by then the repeated key has already collapsed to one value.
@@ -279,6 +297,8 @@ def report_settings(settings: dict | None = None, strict: bool = False,
         log.error(f"settings.conf: {message}")
     for message in warnings:
         log.warning(f"settings.conf: {message}")
+    for message in notes:
+        log.info(f"settings.conf: {message}")
 
     if errors:
         log.error("Fix the settings above, then run again.")

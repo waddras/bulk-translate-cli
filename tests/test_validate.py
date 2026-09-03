@@ -29,35 +29,44 @@ SANE = {
 
 
 def test_a_sane_config_is_silent():
-    errors, warnings = check_settings(SANE)
+    errors, warnings, notes = check_settings(SANE)
     assert errors == []
     assert warnings == []
+    assert notes == []
 
 
 def test_the_shipped_defaults_are_clean():
     """The real defaults must not trip their own validator."""
-    errors, warnings = check_settings()
+    errors, warnings, notes = check_settings()
     assert errors == [], errors
     assert warnings == [], warnings
+    assert notes == [], notes
 
 
 # ── The configuration that caused the real 429 storm ──────────────────────────
 
 def test_duplicate_models_are_reported():
     conf = dict(SANE, MODEL_POOL=["a", "b", "a"], GEMINI_MODEL="a")
-    _, warnings = check_settings(conf)
+    _, warnings, _ = check_settings(conf)
     assert any("repeats" in w for w in warnings)
 
 
-def test_retry_attempts_below_the_model_count_is_reported():
+def test_retry_attempts_below_the_model_count_is_only_a_note():
+    """The code raises it unconditionally, so there is nothing to warn about.
+
+    It warned on every command and, worse, made --strict refuse to run over a
+    condition already corrected in ai.effective_attempts().
+    """
     conf = dict(SANE, RETRY_ATTEMPTS=2,
                 MODEL_POOL=["a", "b", "c", "d", "e", "f"], GEMINI_MODEL="a")
-    _, warnings = check_settings(conf)
-    assert any("RETRY_ATTEMPTS" in w for w in warnings)
+    _, warnings, notes = check_settings(conf)
+    assert not any("RETRY_ATTEMPTS" in w for w in warnings), \
+        "demanding action where none is possible trains people to ignore warnings"
+    assert any("RETRY_ATTEMPTS" in n for n in notes)
 
 
 def test_an_empty_pool_is_reported():
-    _, warnings = check_settings(dict(SANE, MODEL_POOL=[]))
+    _, warnings, _ = check_settings(dict(SANE, MODEL_POOL=[]))
     assert any("no fallback" in w for w in warnings)
 
 
@@ -77,7 +86,7 @@ def test_an_empty_pool_is_reported():
     ({"LANGUAGE_CODES": []}, "an object"),
 ])
 def test_broken_values_are_errors(override, fragment):
-    errors, _ = check_settings(dict(SANE, **override))
+    errors, _, _ = check_settings(dict(SANE, **override))
     assert any(fragment in e for e in errors), (fragment, errors)
 
 
@@ -85,31 +94,31 @@ def test_broken_values_are_errors(override, fragment):
 
 def test_chunk_larger_than_blob_limit_is_reported():
     conf = dict(SANE, MAX_LINES_PER_CHUNK=1000, MAX_BLOB_LINES=500)
-    _, warnings = check_settings(conf)
+    _, warnings, _ = check_settings(conf)
     assert any("MAX_BLOB_LINES" in w for w in warnings)
 
 
 def test_tolerance_larger_than_chunk_is_reported():
     conf = dict(SANE, MAX_LINES_PER_CHUNK=10, PARTIAL_LINE_TOLERANCE=50)
-    _, warnings = check_settings(conf)
+    _, warnings, _ = check_settings(conf)
     assert any("PARTIAL_LINE_TOLERANCE" in w for w in warnings)
 
 
 def test_parallel_without_cooldown_is_reported():
     conf = dict(SANE, PARALLEL_CHUNKS=4, PARALLEL_COOLDOWN=0)
-    _, warnings = check_settings(conf)
+    _, warnings, _ = check_settings(conf)
     assert any("rate limiting" in w for w in warnings)
 
 
 def test_same_source_and_target_language_is_reported():
     conf = dict(SANE, SOURCE_LANGUAGE="arabic", TARGET_LANGUAGE="arabic")
-    _, warnings = check_settings(conf)
+    _, warnings, _ = check_settings(conf)
     assert any("nothing would change" in w for w in warnings)
 
 
 def test_unmapped_language_is_reported():
     conf = dict(SANE, TARGET_LANGUAGE="klingon")
-    _, warnings = check_settings(conf)
+    _, warnings, _ = check_settings(conf)
     assert any("LANGUAGE_CODES" in w for w in warnings)
 
 
@@ -119,12 +128,12 @@ def test_a_template_contradicting_the_array_contract_is_reported():
     conf = dict(SANE, PROMPT_TEMPLATE=(
         "Translate this.\nReturn a valid JSON object with the EXACT same keys.\n"
         "{json_blob}"))
-    _, warnings = check_settings(conf)
+    _, warnings, _ = check_settings(conf)
     assert any("JSON array" in w for w in warnings)
 
 
 def test_a_template_without_the_placeholder_is_reported():
-    _, warnings = check_settings(dict(SANE, PROMPT_TEMPLATE="Translate please."))
+    _, warnings, _ = check_settings(dict(SANE, PROMPT_TEMPLATE="Translate please."))
     assert any("json_blob" in w for w in warnings)
 
 
@@ -159,7 +168,19 @@ def test_strict_turns_warnings_into_a_block(isolated_settings):
 # ── the all-clear message ─────────────────────────────────────────────────────
 
 def warned_settings() -> dict:
-    """A config with nothing fatal, but something worth warning about."""
+    """A config with nothing fatal, but something worth warning about.
+
+    A repeated model, not a low RETRY_ATTEMPTS: that one is a note now, and a
+    note deliberately does not suppress the all-clear.
+    """
+    settings = dict(SANE)
+    settings["GEMINI_MODEL"] = "model-a"
+    settings["MODEL_POOL"] = ["model-a", "model-a", "model-b"]
+    return settings
+
+
+def noted_settings() -> dict:
+    """A config whose only finding is one the code corrects by itself."""
     settings = dict(SANE)
     settings["RETRY_ATTEMPTS"] = 1
     settings["MODEL_POOL"] = ["model-a", "model-b", "model-c"]
@@ -199,3 +220,21 @@ def test_announce_ok_is_off_by_default(capsys):
     """A normal run should not congratulate the user on every command."""
     report_settings(SANE)
     assert "looks good" not in all_output(capsys)
+
+
+# ── notes carry no obligation ─────────────────────────────────────────────────
+
+def test_a_noted_config_is_still_announced_as_good(capsys):
+    """A finding the code corrects itself is not a blemish on the config."""
+    assert report_settings(noted_settings(), announce_ok=True) is True
+    output = all_output(capsys)
+    assert "RETRY_ATTEMPTS" in output, "the note should still be visible"
+    assert "looks good" in output
+
+
+def test_strict_does_not_block_on_notes(isolated_settings):
+    """--strict escalates warnings, but a note asks for nothing."""
+    isolated_settings["RETRY_ATTEMPTS"] = 1
+    isolated_settings["MODEL_POOL"] = ["model-a", "model-b", "model-c"]
+    isolated_settings["GEMINI_MODEL"] = "model-a"
+    assert report_settings(strict=True) is True

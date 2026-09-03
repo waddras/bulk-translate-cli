@@ -16,13 +16,15 @@ from btcli.blob import build_blob
 
 
 def _writer(files, chunks=None, manifest_run=None, **overrides):
-    meta, payload, _ = build_blob(files)
     settings = dict(
         suffix=".ar", force_srt=False, keep_styles=None, passthrough_styles=None,
         source_lang="english", target_lang="arabic", mode="chunked",
         files_per_call=None, manifest_run=manifest_run,
     )
     settings.update(overrides)
+    # keep_styles filters the blob as well as the writer, the way run_translate
+    # does it — otherwise a passthrough style would still appear in the payload.
+    meta, payload, _ = build_blob(files, keep_styles=settings["keep_styles"])
     writer = BatchWriter(files, meta, payload,
                          chunks if chunks is not None else [payload], **settings)
     return writer, payload
@@ -232,3 +234,67 @@ def test_details_report_dedup_and_chunk_sizes(tmp_path, ass_factory):
     assert details["unique_lines"] == 2, "the repeated line collapses"
     assert details["deduplicated_lines"] == 1
     assert details["batch_chunk_sizes"] == writer.chunk_sizes
+
+
+
+# ── Files with nothing to translate ───────────────────────────────────────────
+#
+# Every style in the passthrough list means the payload has no entry for the
+# file at all. That used to read as "not ready yet", so the file was never
+# written and was then reported as "not written because 0 unique line(s) remain
+# untranslated" — a warning that named no problem and no action.
+
+
+def _signs_only(tmp_path, ass_factory):
+    """A file whose every cue belongs to a style that is not being translated."""
+    source = ass_factory(tmp_path / "a.en.ass",
+                         [("Signs", "SHOP"), ("Signs", "CLOSED")],
+                         styles=("Default", "Signs"))
+    return _writer([source], keep_styles=["Default"],
+                   passthrough_styles=["Signs"])
+
+
+def test_an_all_passthrough_file_is_still_written(tmp_path, ass_factory):
+    writer, payload = _signs_only(tmp_path, ass_factory)
+    assert payload == {}, "nothing translatable, so nothing to send"
+    assert writer.required_by_file[1] == set()
+
+    writer.write_ready({})
+    assert writer.completed == ["a.ar.ass"]
+    output = tmp_path / "a.ar.ass"
+    assert output.exists()
+    assert [event.text for event in pysubs2.SSAFile.load(str(output))] == \
+        ["SHOP", "CLOSED"], "the passthrough cues must survive"
+
+
+def test_an_all_passthrough_file_raises_no_warning(tmp_path, ass_factory):
+    writer, _ = _signs_only(tmp_path, ass_factory)
+
+    missing = writer.finalize({}, tolerance=0)
+    assert missing == {}
+    assert writer.warnings == [], \
+        "nothing is wrong with a file that needed no translation"
+
+
+def test_an_all_passthrough_file_counts_as_complete(tmp_path, ass_factory):
+    """manifest.finish() reads this status to decide whether the job succeeded."""
+    manifest = _RecordingManifest()
+    source = ass_factory(tmp_path / "a.en.ass", [("Signs", "SHOP")],
+                         styles=("Default", "Signs"))
+    writer, _ = _writer([source], keep_styles=["Default"],
+                        passthrough_styles=["Signs"], manifest_run=manifest)
+
+    writer.finalize({}, tolerance=0)
+    assert manifest.records[0][1]["status"] == "complete"
+
+
+def test_a_file_with_no_cues_at_all_says_so(tmp_path, ass_factory):
+    """The old message blamed untranslated lines, of which there were none."""
+    source = ass_factory(tmp_path / "empty.en.ass", [])
+    writer, _ = _writer([source])
+
+    writer.finalize({}, tolerance=0)
+    assert not (tmp_path / "empty.ar.ass").exists()
+    assert any("no cues" in warning for warning in writer.warnings), \
+        writer.warnings
+    assert not any("0 unique line(s)" in warning for warning in writer.warnings)

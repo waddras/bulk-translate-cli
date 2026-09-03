@@ -82,6 +82,11 @@ btcli --check-settings           # validate and report
 btcli --strict --check-settings  # treat warnings as errors too
 ```
 
+Findings come at three levels. **Errors** always stop the run. **Warnings** mean
+it will run but not as intended, and stop it under `--strict`. **Notes** are
+worth knowing but need no action — a setting the code already corrects by itself
+— so they never block and never withhold the all-clear.
+
 ## Commands
 
 Every command takes `-p PATH` and defaults to the current directory. Run

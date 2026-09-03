@@ -14,9 +14,11 @@ Only this repo is relevant. The `waddras/bulk-translate` web-UI repo is retired.
 
 ## Working preferences
 
-- **Discuss first, never auto-code.** When a bug is reported or a change
-  discussed, only discuss it. Ask "want me to code this?" and wait for an
-  explicit "code" / "yes" / "go".
+- **Diagnosed items: just fix them and commit.** Anything already worked out and
+  written down here does not need re-confirming — implement it, test it, push it.
+- **Still discuss first when the fix is not settled.** A change with open design
+  questions, or one whose diagnosis says "verify on a real run first", gets
+  discussed before any code.
 - **Be concise.** No extra tables, summaries or explanation beyond what was asked.
 - **Say where commands run**, in bold — e.g. **On the box (`/opt/btcli`):**
 - **Long-running SSH commands:** warn up front and give literal `tmux` commands.
@@ -24,7 +26,7 @@ Only this repo is relevant. The `waddras/bulk-translate` web-UI repo is retired.
 ## State
 
 `main` = all work merged, nothing outstanding unpushed.
-335 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
+341 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
 help-page render, wheel build + entry-point check.
 
 Every module carries a docstring explaining what the file does and how it flows;
@@ -110,10 +112,13 @@ comments survive, write a `.bak`, and refuse to produce an unparseable file.
 `EMBED_FONT: true`. Verified all 7 model names exist against
 `GET /v1beta/models`.
 
-Nothing has ever been verified against the live API by tests — all 335 use a
+Nothing has ever been verified against the live API by tests — all 341 use a
 fake translator. Real-world confidence comes only from actual runs.
 
 ## Recently fixed
+
+Original item numbers are kept, so 1, 2 and 4 are here and 3 and 5 are still
+open below.
 
 ### 1. Resume prompt fired mid-run — FIXED
 
@@ -147,24 +152,43 @@ Note for future changes: `_resolve_cache` runs **per batch** (`FILES_PER_BATCH`,
 25) and interactive mode loops `run_translate` per folder, so anything that
 prompts from there can fire long after the run began.
 
-## Open items
-
-### 2. "not written because 0 unique line(s) remain untranslated" (bug)
+### 2. "not written because 0 unique line(s) remain untranslated" — FIXED
 
 Nonsense warning on files whose every style is in the passthrough list
-(`→ 0 cues`).
+(`→ 0 cues`), and the file was not written at all.
 
-Cause, both in `batch.py`:
-- line 147 `if not required or not required.issubset(available): continue` —
-  a file with no translatable cues has an empty `required`, so it is skipped and
-  never emitted.
-- line 175 `if missing_keys and len(missing_keys) <= tolerance:` — an empty set
-  is falsy, so it falls through to the failure branch, which reports
-  `len(missing_keys)` = 0.
+Three places were involved, not the two originally diagnosed:
 
-Proposed: write the file if it has any cues at all, so passthrough content is
-preserved; report "nothing to translate (all styles passthrough)" as info, not a
-warning. Cosmetic — no data lost.
+- `batch.write_ready` — `if not required or not required.issubset(...)` treated
+  an empty requirement as "not ready yet". An empty set is a subset of anything,
+  so dropping the `not required` clause makes such a file ready by definition.
+- `batch.finalize` — the failure message reported `len(missing_keys)` = 0. It now
+  distinguishes "no cues to write at all" from untranslated lines.
+- `sub_post.reassemble_files` — **the one the original diagnosis missed.** It
+  bailed on `if not cues` before reaching `build_ass_output`, which is what
+  actually carries passthrough cues over from the source. Without this the file
+  still would not have been written. Guarded by `_passthrough_cue_count()`, and
+  only for ASS: SRT has no styles, so it has nothing to carry.
+
+Written files are recorded as `complete`, because `manifest.finish()` reads that
+status to decide whether the job succeeded and a file needing no translation is
+not a shortfall.
+
+### 4. RETRY_ATTEMPTS warning was mis-levelled — FIXED
+
+`ai.effective_attempts()` raises the value unconditionally, so the warning
+demanded action that was impossible on every single command — and `--strict`
+refused to run at all over it.
+
+`check_settings()` now returns **three** lists: `(errors, warnings, notes)`.
+A note is logged with `log.info`, never blocks even under `--strict`, and does
+not withhold the "looks good" verdict. Callers unpacking two values need
+updating; `report_settings` is the only one in `btcli/`.
+
+The general rule this encodes: a warning that asks for nothing trains people to
+ignore warnings that ask for something.
+
+## Open items
 
 ### 3. "Ignoring unexpected inline ID" churn (inefficiency)
 
@@ -180,12 +204,6 @@ Proposed: number the **wire** IDs contiguously per chunk and keep the mapping to
 the real `FFLLLL` tag internally. Validation stays equally strict, just against
 dense IDs. Verify the hypothesis first by logging rejected IDs against the
 chunk's expected set on one real run.
-
-### 4. RETRY_ATTEMPTS warning is mis-levelled (cosmetic)
-
-`effective_attempts()` already corrects the condition unconditionally, so the
-warning demands action where none exists, on every command. Should be
-`log.info`/`detail`, not `log.warning`.
 
 ### 5. Next feature: one-call Gemini classification during probe
 

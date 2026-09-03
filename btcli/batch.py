@@ -167,16 +167,30 @@ class BatchWriter:
 
         Called after each API response, so a completed file lands immediately
         rather than waiting for the rest of the batch.
+
+        A file with nothing required is ready by definition: every one of its
+        styles is in the passthrough list, so there is no translation to wait
+        for and its cues still belong in the output. This used to be skipped as
+        though an empty requirement meant "not ready yet", which left the file
+        unwritten and reported as having 0 lines untranslated.
         """
         available = set(translated)
         for file_idx in range(1, len(self.files) + 1):
             if file_idx in self.emitted:
                 continue
             required = self.required_by_file[file_idx]
-            if not required or not required.issubset(available):
+            # An empty requirement is a subset of anything, so it passes here.
+            if not required.issubset(available):
                 continue
-            log.info(f"  All lines ready: {self._source(file_idx).name} "
-                     f"— generating output now")
+            if required:
+                log.info(f"  All lines ready: {self._source(file_idx).name} "
+                         f"— generating output now")
+            else:
+                log.info(f"  {self._source(file_idx).name}: nothing to translate "
+                         f"(all styles passthrough) — writing as-is")
+            # Recorded as complete either way: the file was written in full, and
+            # manifest.finish() reads this status to decide whether the job
+            # succeeded. A file needing no translation is not a shortfall.
             self.emit(file_idx, translated, "complete")
 
     def finalize(self, translated: dict, tolerance: int) -> dict:
@@ -213,8 +227,16 @@ class BatchWriter:
                     self.warnings.append(message)
                     continue
 
-            message = (f"{source.name}: not written because {len(missing_keys)} "
-                       f"unique line(s) remain untranslated")
+            if self.required_by_file[file_idx]:
+                message = (f"{source.name}: not written because "
+                           f"{len(missing_keys)} unique line(s) remain "
+                           f"untranslated")
+            else:
+                # Nothing was ever required, so untranslated line counts are not
+                # the reason. write_ready has already tried and failed to write
+                # it, which means there was no cue to write at all.
+                message = (f"{source.name}: not written because it has no cues "
+                           f"to write")
             log.warning(message)
             self.warnings.append(message)
             if self.manifest_run:

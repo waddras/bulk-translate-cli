@@ -170,15 +170,19 @@ SEEING THE WORK FIRST
   -i sub for full numbers.
 
 CHECKING YOUR SETTINGS
-  settings.conf is validated before any work starts. Errors stop the run;
-  warnings are printed and the run continues, unless --strict is given.
+  settings.conf is validated before any work starts, at three levels:
+
+    error    the job cannot run correctly. Always stops the run.
+    warning  it will run, but not as intended. Stops it only with --strict.
+    note     worth knowing, nothing to do. Never stops anything.
 
     btcli --check-settings        validate and exit, doing no work
     btcli --strict translate ...  refuse to run if anything looks wrong
 
   Warnings catch quiet mistakes rather than crashes, for example a MODEL_POOL
-  that repeats a model, or a RETRY_ATTEMPTS lower than the number of models
-  configured.
+  that repeats a model, which shortens the retry ladder without saying so.
+  A RETRY_ATTEMPTS lower than the number of models is only a note, because it is
+  raised automatically and there is nothing for you to change.
 
 CONFIGURATION (first match wins)
   ./settings.conf                     current directory (careful: takes priority)
