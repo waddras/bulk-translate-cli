@@ -13,6 +13,29 @@ Location: one file per series, in the series root, e.g.
     Fruits Basket (2019)/.btcli-cache.json
 A path pointing at a season folder resolves to the same file, so seasons of one
 series share their cached lines.
+
+HOW A JOB USES IT
+    1. ``split()`` divides the payload into lines already known and lines that
+       still need sending. Only the latter reach the API.
+    2. ``store_and_flush()`` is called after every response, so each batch of
+       translations is durable before the next request goes out.
+    3. ``loaded`` and ``added`` drive the reporting, so it is always visible
+       whether resuming was in effect.
+
+FILE SHAPE
+    {
+      "version": 1,
+      "series": "Fruits Basket (2019)",
+      "languages": {
+        "arabic": {"<20-hex content key>": "translated text", ...},
+        "french": {...}
+      },
+      "updated": "2026-06-28T14:02:11Z"
+    }
+
+    Languages are separate sections, so translating a series into Arabic never
+    disturbs the French entries — see ``flush``, which merges rather than
+    overwrites for exactly this reason.
 """
 from __future__ import annotations
 
@@ -33,11 +56,20 @@ _SEASON_RE = re.compile(r"^(?:season|series|saison|s)[\s._-]*\d+$|^\d{1,2}$", re
 
 
 def _now() -> str:
+    """UTC timestamp as ``2026-06-28T14:02:11Z``, for the file's updated field."""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _key(text: str) -> str:
-    """Stable content key for a source line."""
+    """Stable content key for a source line.
+
+    Whitespace is collapsed first, so a line that differs only in indentation or
+    line wrapping still hits the same entry — the translation would be identical.
+
+    Truncated to 20 hex characters (80 bits). Long enough that a collision across
+    a library of subtitles is not a practical concern, short enough that the
+    cache file stays readable.
+    """
     normalized = " ".join(text.split())
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
 
@@ -66,11 +98,19 @@ class TranslationCache:
     """Content-keyed store of translated lines for one series and language."""
 
     def __init__(self, root: Path, target_lang: str):
+        """Open (and immediately read) the cache for one series and language.
+
+        Constructing this is cheap and side-effect-free on disk: nothing is
+        written until something is stored.
+        """
         self.root = Path(root)
+        # Lower-cased so "Arabic" and "arabic" share one section.
         self.target_lang = target_lang.lower()
         self.path = self.root / CACHE_NAME
         self._entries: dict = {}
         self._dirty = False
+        # Kept separate from len(self._entries) so reporting can distinguish
+        # "found on disk" from "learned during this job".
         self._loaded_count = 0
         self._added = 0
         self._load()
@@ -78,6 +118,11 @@ class TranslationCache:
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def _load(self) -> None:
+        """Read this language's entries. An unreadable cache is skipped, not fatal.
+
+        Losing cached lines costs quota; refusing to translate because of a
+        damaged cache would cost the whole job.
+        """
         if not self.path.exists():
             return
         try:
@@ -93,7 +138,15 @@ class TranslationCache:
             self._entries = {}
 
     def flush(self, force: bool = False) -> None:
-        """Write the cache to disk, preserving other languages' entries."""
+        """Write the cache to disk, preserving other languages' entries.
+
+        The file is re-read here rather than trusted from construction time,
+        because only this language's section is ours to replace. Writing the
+        in-memory state wholesale would delete every other language.
+
+        Written atomically via a .tmp rename: this is called after every API
+        response, so a partial write is a real possibility.
+        """
         if not self._dirty and not force:
             return
 
@@ -135,7 +188,15 @@ class TranslationCache:
         return cached, missing
 
     def store(self, payload: dict, translated: dict) -> int:
-        """Record translations, keyed by their source text. Returns new entries."""
+        """Record translations, keyed by their source text. Returns new entries.
+
+        *payload* supplies the source text each tag came from — the cache is
+        keyed by content, so a translation cannot be stored without it.
+
+        Silently skips anything unusable: a tag with no matching source, a
+        non-string, or blank text. Caching an empty translation would poison
+        future runs, which would then skip the line believing it done.
+        """
         added = 0
         for tag, text in translated.items():
             source = payload.get(tag)
@@ -196,6 +257,7 @@ class TranslationCache:
         return self._added
 
     def __len__(self) -> int:
+        """Total entries held for this language."""
         return len(self._entries)
 
     def __bool__(self) -> bool:
