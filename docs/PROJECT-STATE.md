@@ -26,7 +26,7 @@ Only this repo is relevant. The `waddras/bulk-translate` web-UI repo is retired.
 ## State
 
 `main` = all work merged, nothing outstanding unpushed.
-381 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
+390 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
 help-page render, wheel build + entry-point check.
 
 Every module carries a docstring explaining what the file does and how it flows;
@@ -113,7 +113,7 @@ comments survive, write a `.bak`, and refuse to produce an unparseable file.
 `EMBED_FONT: true`. Verified all 7 model names exist against
 `GET /v1beta/models`.
 
-Nothing has ever been verified against the live API by tests — all 381 use a
+Nothing has ever been verified against the live API by tests — all 390 use a
 fake translator or a stubbed selection call. Real-world confidence comes only
 from actual runs. **The style-selection prompt in particular has never had a
 real reply**: its validation is well covered, its prompt wording is not.
@@ -209,6 +209,19 @@ Evidence sent per style: cue count, 2–3 samples, and whether cues carry `\pos`
 or `\k`. Cue count is the decisive signal. Track metadata comes too. Each
 **track** is a candidate with its own styles, because styles only exist once a
 track is chosen — that is why one call decides both rather than two.
+
+**Styles are numbered and the model answers in numbers.** `enumerate_styles()`
+numbers every (track, style) pair globally from 1, and that one numbering feeds
+the payload, the list shown to the user before the call, and the reply check —
+all derived from the same pure function so they cannot drift. Numbers remove the
+whole class of name errors (case slips, reformatted names, invented names) and
+make validation a range check instead of string matching. Numbering globally also
+means a number identifies the *track*, so there is no separate track field to
+contradict the styles chosen. A reply spanning tracks keeps the track owning most
+of the numbers, which narrows rather than widens.
+
+`usable_candidates()` must be applied before displaying, not just inside
+`choose()`, or the numbers a user sees would not be the numbers sent.
 
 Deliberate choices:
 - **Pinned model** (`AI_SELECT_MODEL`, default `gemini-3.5-flash-lite`) — chosen

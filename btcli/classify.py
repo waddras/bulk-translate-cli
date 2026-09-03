@@ -17,6 +17,22 @@ WHAT MAKES THE JUDGEMENT POSSIBLE
     styles, because styles only exist once a track is chosen — that is why the
     track and the styles have to be decided by the same call rather than two.
 
+STYLES ARE NUMBERED, AND THE MODEL ANSWERS IN NUMBERS
+    ``enumerate_styles`` numbers every (track, style) pair once, globally from 1,
+    and that single numbering is what the payload carries, what the user is shown
+    before the call, and what the reply is validated against.
+
+    Answering with a number rather than a name removes the entire class of
+    name errors: no case slips, no reformatted ``Nodame Insert JP``, no invented
+    ``MainDialogue``. A number is either in range or it is not, which is a far
+    tighter check than string matching.
+
+    Numbering globally also means a number identifies the TRACK as well as the
+    style, so there is no separate track field in the reply that could disagree
+    with the styles chosen. If a reply spans two tracks the track owning most of
+    the numbers wins and the strays are dropped — that narrows the selection,
+    never widens it.
+
 WHAT THIS MODULE DELIBERATELY DOES NOT DO
     * **No pacing.** ``ai.pace_requests`` would stall the interactive
       questionnaire for PARALLEL_COOLDOWN seconds per folder, and these calls are
@@ -34,15 +50,18 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO
       user's quota on signs and karaoke.
 
 VALIDATION
-    Same discipline as the translation IDs in ``ai._normalize_result``: the track
-    must be one that was offered, and every style name must be one that actually
-    exists in that track. Anything invented is dropped and logged. The model
-    proposes; it does not get to introduce names.
+    Same discipline as the translation IDs in ``ai._normalize_result``: every
+    number must be one that was offered. Anything else is dropped and logged, and
+    a reply with nothing valid left is discarded whole. The model proposes; it
+    does not get to introduce anything.
 
 FLOW
-    ``style_facts(path)``     evidence for one subtitle file, pure pysubs2
-    ``choose(candidates...)`` one API call, returns a verdict dict or None
-    caller (interactive.py) shows the verdict and asks the user to confirm it
+    ``style_facts(path)``        evidence for one subtitle file, pure pysubs2
+    ``usable_candidates(...)``   the candidates that will actually be sent
+    ``enumerate_styles(...)``    the numbering, shared by payload/display/checks
+    ``choose(candidates...)``    one API call, returns a verdict dict or None
+    caller (interactive.py) shows the numbered list, then the verdict, and asks
+    the user to confirm it
 """
 from __future__ import annotations
 
@@ -136,18 +155,48 @@ def style_facts(path) -> list:
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-def _verdict_schema() -> dict:
-    """Schema pinning the reply to one verdict object.
+def usable_candidates(candidates: list) -> list:
+    """The candidates that will actually be sent, in order.
 
-    Only dialogue_styles is required: a folder of subtitle files has no track to
-    choose, and a model that omits an optional field is easier to handle than one
-    that invents a value for it.
+    Callers must display and validate against THIS list, not the raw one, or the
+    numbers a user is shown would not be the numbers the model was given.
+    """
+    return [c for c in candidates if c.get("styles")][:MAX_TRACK_CANDIDATES]
+
+
+def enumerate_styles(candidates: list) -> list:
+    """Number every (track, style) pair once, globally, from 1.
+
+    A pure function of *candidates*, so the payload, the list shown to the user
+    and the reply check all derive the same numbering without passing it around.
+
+    Returns [{number, candidate, track, name, fact}], where *candidate* is the
+    position in the candidate list and *track* is the real track index (or None
+    for subtitle files, which have no track).
+    """
+    entries = []
+    for position, candidate in enumerate(candidates):
+        for fact in candidate.get("styles", []):
+            entries.append({
+                "number": len(entries) + 1,
+                "candidate": position,
+                "track": candidate.get("index"),
+                "name": fact["name"],
+                "fact": fact,
+            })
+    return entries
+
+
+def _verdict_schema() -> dict:
+    """Schema pinning the reply to one verdict object of style NUMBERS.
+
+    There is no track field: a number identifies the track as well as the style,
+    so a separate field could only ever contradict the numbers chosen.
     """
     return {
         "type": "OBJECT",
         "properties": {
-            "track": {"type": "INTEGER"},
-            "dialogue_styles": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "dialogue_styles": {"type": "ARRAY", "items": {"type": "INTEGER"}},
             "reason": {"type": "STRING"},
         },
         "required": ["dialogue_styles"],
@@ -176,38 +225,40 @@ def _output_contract(multi_track: bool) -> str:
     break parsing. The instruction says what to choose; this says how to answer.
     """
     track_rule = (
-        "- Set track to the index of the ONE track that carries the dialogue.\n"
-        if multi_track else
-        "- Omit track. These are subtitle files, so there is no track to choose.\n"
+        "- Every number you return MUST belong to the SAME track.\n"
+        if multi_track else ""
     )
     return (
         "BTCLI OUTPUT CONTRACT (this overrides any earlier output-format wording):\n"
-        "- Return a single JSON object with the fields: track, dialogue_styles, reason.\n"
+        "- Return a single JSON object with exactly two fields: dialogue_styles and reason.\n"
+        "- dialogue_styles is a list of the NUMBERS (the \"n\" field) of the styles that\n"
+        "  carry spoken dialogue. Return numbers, never names.\n"
+        "- Every number must be one that appears in the evidence below. Never invent one.\n"
         + track_rule +
-        "- dialogue_styles lists the style names, copied EXACTLY as given, that carry\n"
-        "  spoken dialogue in that track. Never invent, translate, or reformat a name.\n"
-        "- Leave dialogue_styles empty if none of the styles is dialogue.\n"
-        "- Do not list styles that only carry signs, titles, location captions, letters,\n"
-        "  inserts, credits, opening or ending songs, or karaoke.\n"
+        "- Return an empty list if none of the styles carries dialogue.\n"
+        "- Do not include styles that only carry signs, titles, location captions,\n"
+        "  letters, inserts, credits, opening or ending songs, or karaoke.\n"
         "- reason is one short sentence explaining the choice.\n"
         "- Return JSON only, with no markdown or commentary around the object.\n"
     )
 
 
 def _payload(candidates: list) -> dict:
-    """The evidence, as the model receives it."""
+    """The evidence, as the model receives it, carrying the shared numbering."""
+    entries = enumerate_styles(candidates)
     tracks = []
-    for candidate in candidates:
+    for position, candidate in enumerate(candidates):
         entry = {
             "styles": [
                 {
-                    "name": fact["name"],
-                    "cues": fact["cues"],
-                    "positioned": fact["positioned"],
-                    "karaoke": fact["karaoke"],
-                    "samples": fact["samples"],
+                    "n": item["number"],
+                    "name": item["name"],
+                    "cues": item["fact"]["cues"],
+                    "positioned": item["fact"]["positioned"],
+                    "karaoke": item["fact"]["karaoke"],
+                    "samples": item["fact"]["samples"],
                 }
-                for fact in candidate.get("styles", [])
+                for item in entries if item["candidate"] == position
             ],
         }
         if candidate.get("index") is not None:
@@ -226,7 +277,7 @@ def _build_prompt(candidates: list, instruction: str, source_lang: str) -> str:
     return (
         f"You are choosing which {source_lang} subtitle content is worth translating.\n\n"
         f"{base}\n\n"
-        "Each style below is described by how many cues use it, whether those cues are\n"
+        "Each style below has a number (n), how many cues use it, whether those cues are\n"
         "positioned on screen (a sign) or carry karaoke timing (an opening or ending),\n"
         "and a few sample lines. Cue count is the strongest signal: real dialogue runs\n"
         "to hundreds of cues, a sign or a title has a handful.\n\n"
@@ -254,80 +305,95 @@ def _unwrap(result):
     return result
 
 
-def _pick_candidate(candidates: list, track):
-    """The candidate the verdict refers to, or None if it named an unknown track.
+def _as_number(value):
+    """A style number from the reply, or None.
 
-    A single candidate with no index is the subtitle-files case: any track the
-    model volunteered is irrelevant, so it is ignored rather than rejected.
+    ``"3"`` is accepted as 3: a digit string is a formatting slip of the same
+    kind as wrong capitalisation, not an invented answer. Booleans are refused
+    explicitly because bool is a subclass of int in Python, so True would
+    otherwise pass as style 1.
     """
-    indexed = [c for c in candidates if c.get("index") is not None]
-    if not indexed:
-        return candidates[0] if candidates else None
-    if isinstance(track, bool) or not isinstance(track, int):
-        # No usable track, but one candidate means there was no choice to make.
-        return indexed[0] if len(indexed) == 1 else None
-    for candidate in indexed:
-        if candidate["index"] == track:
-            return candidate
-    log.detail(f"    Ignoring verdict for unknown track {track}")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
     return None
 
 
-def _accepted_styles(names, available: list) -> list:
-    """Style names from the reply that genuinely exist, in the given order.
+def _accepted_entries(values, entries: list) -> list:
+    """The numbered entries the reply selected, deduplicated, in reply order.
 
-    Unknown names are dropped and logged rather than trusted — the same rule the
-    translation path applies to inline IDs. A case-insensitive match is allowed
-    because the model echoing "default" for "Default" is a formatting slip, not
-    an invented style; anything else is.
+    Anything that is not a number in range is dropped and logged, the same rule
+    the translation path applies to inline IDs.
     """
-    if not isinstance(names, list):
+    if not isinstance(values, list):
         return []
-    lookup = {name.casefold(): name for name in available}
+    by_number = {entry["number"]: entry for entry in entries}
     accepted, seen = [], set()
-    for name in names:
-        if not isinstance(name, str):
+    for value in values:
+        number = _as_number(value)
+        if number is None or number not in by_number:
+            log.detail(f"    Ignoring style number that was not offered: {value!r}")
             continue
-        real = name if name in available else lookup.get(name.casefold())
-        if real is None:
-            log.detail(f"    Ignoring style the file does not have: {name!r}")
-            continue
-        if real not in seen:
-            seen.add(real)
-            accepted.append(real)
+        if number not in seen:
+            seen.add(number)
+            accepted.append(by_number[number])
     return accepted
+
+
+def _one_track(accepted: list) -> list:
+    """Keep only the entries from a single track — the one with the most.
+
+    A reply mixing tracks cannot be honoured as given, since only one track gets
+    extracted. Dropping the minority narrows the selection; picking the union
+    would widen it into content the user did not ask to translate. Ties go to the
+    earliest track, so the choice is deterministic.
+    """
+    if not accepted:
+        return []
+    groups: dict = {}
+    for entry in accepted:
+        groups.setdefault(entry["candidate"], []).append(entry)
+    if len(groups) == 1:
+        return accepted
+
+    best = sorted(groups.items(), key=lambda item: (-len(item[1]), item[0]))[0][1]
+    dropped = [entry["number"] for entry in accepted if entry not in best]
+    log.detail(f"    Reply mixed tracks; keeping track {best[0]['track']} "
+               f"and dropping style number(s) {dropped}")
+    return best
 
 
 def validate(result, candidates: list) -> dict | None:
     """Turn a raw reply into a verdict, or None if it cannot be trusted.
 
     Returns {track, keep, passthrough, reason, styles}: *keep* is concrete style
-    names, *passthrough* is the "+ALL" sentinel meaning everything else, and
-    *styles* is the style list it was judged against, so a cached verdict can
-    later be checked against what is on disk.
+    names resolved from the numbers, *passthrough* is the "+ALL" sentinel meaning
+    everything else, and *styles* is the full style list of the chosen track, so
+    a cached verdict can later be checked against what is on disk.
     """
     verdict = _unwrap(result)
     if verdict is None:
         log.detail("    Verdict reply was not an object btcli could read")
         return None
 
-    candidate = _pick_candidate(candidates, verdict.get("track"))
-    if candidate is None:
+    usable = usable_candidates(candidates)
+    entries = enumerate_styles(usable)
+    chosen = _one_track(_accepted_entries(verdict.get("dialogue_styles"), entries))
+    if not chosen:
+        log.detail("    Verdict selected no style number that was offered")
         return None
 
-    available = [fact["name"] for fact in candidate.get("styles", [])]
-    keep = _accepted_styles(verdict.get("dialogue_styles"), available)
-    if not keep:
-        log.detail("    Verdict named no style this track actually has")
-        return None
-
+    candidate = usable[chosen[0]["candidate"]]
     reason = verdict.get("reason")
     return {
         "track": candidate.get("index"),
-        "keep": keep,
+        "keep": [entry["name"] for entry in chosen],
         "passthrough": [PASSTHROUGH_REST],
         "reason": reason.strip() if isinstance(reason, str) else "",
-        "styles": available,
+        "styles": [fact["name"] for fact in candidate.get("styles", [])],
     }
 
 
@@ -352,7 +418,7 @@ def choose(candidates: list, api_key: str, *, instruction: str = "",
     no candidates, no styles, no key, a refused call, an untrustworthy reply —
     returns None, and the caller asks the user instead.
     """
-    usable = [c for c in candidates if c.get("styles")][:MAX_TRACK_CANDIDATES]
+    usable = usable_candidates(candidates)
     if not usable:
         log.detail("    No styles to classify")
         return None

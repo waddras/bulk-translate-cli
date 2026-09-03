@@ -117,23 +117,35 @@ Let Gemini choose the track and styles for you? [y/N]: y
 Instructions for Gemini [Enter for the default]:
 
   FOLDER - Season 01  (12 file(s))
-  Gemini chose track 0 and 2 of 41 style(s):
-    translate:   Base01, Nodame Primary
-    passthrough: the other 39 styles, untouched
+  Track 0  [eng] ass  "English"
+  1) Base01          2) Base01 - Overlap   3) EdEnglish      4) NodameOP
+  5) NodameED        6) Nodame Primary     7) letter1        8) sign1
+  Asking Gemini to choose the track and styles...
+  gemini-3.5-flash-lite chose track 0 and 2 of 41 style(s):
+    translate:   1) Base01, 6) Nodame Primary
+    passthrough: the other 39 style(s), untouched
     reason:      Base01 and Nodame Primary carry hundreds of conversational
                  cues; the rest are positioned signs or karaoke.
   Use this selection? [Y/n]
 ```
 
+The numbered list is printed before the call, and it is the same numbering the
+model receives — so you can read its answer straight against it. The model
+replies with **numbers, not names**, which removes a whole class of errors: no
+case slips, no reformatted `Nodame Insert JP`, no invented `MainDialogue`. A
+number is either one that was offered or it is not.
+
 One extra API call per folder, on the model pinned by `AI_SELECT_MODEL` so it
 never spends a translation model's daily quota. Each style is judged on its cue
 count, sample lines, and whether its cues carry `\pos` or `\k` — names alone are
-a weak signal.
+a weak signal, so that detail goes in the request even though it is kept out of
+the list you see.
 
-Nothing is taken on trust: a track or style name that does not exist in the file
-is discarded, and a reply with nothing usable left in it is dropped entirely
-rather than widened to "translate everything". Answer `n`, or let the call fail,
-and you get the normal style prompt with nothing lost.
+Nothing is taken on trust: a number that was not offered is discarded, a reply
+spanning two tracks keeps only the track most of its numbers belong to, and a
+reply with nothing valid left is dropped entirely rather than widened to
+"translate everything". Answer `n`, or let the call fail, and you get the normal
+style prompt with nothing lost.
 
 The verdict is cached in that folder's `.btcli.json` and reused only while the
 styles on disk still match, so a re-release with renamed styles gets a fresh

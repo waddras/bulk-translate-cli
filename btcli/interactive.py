@@ -288,7 +288,43 @@ def _video_candidates(video: Path, tracks: list) -> list:
     return candidates
 
 
-def _show_verdict(verdict: dict, cached: bool) -> None:
+def _show_evidence(candidates: list) -> None:
+    """The numbered style list, exactly as the model is about to receive it.
+
+    Shown before the call so the answer can be checked against it: the model
+    replies with these numbers, so this is the legend for reading its verdict.
+    Same numbering, from the same function, so the two cannot drift apart.
+    """
+    from .classify import enumerate_styles
+
+    entries = enumerate_styles(candidates)
+    for position, candidate in enumerate(candidates):
+        mine = [entry for entry in entries if entry["candidate"] == position]
+        if not mine:
+            continue
+        if candidate.get("index") is not None:
+            label = (f"  Track {candidate['index']}  "
+                     f"[{candidate.get('language') or 'und'}] "
+                     f"{candidate.get('codec') or ''}").rstrip()
+            if candidate.get("title"):
+                label += f'  "{candidate["title"]}"'
+            print(label)
+        _columns([f"{entry['number']}) {entry['name']}" for entry in mine])
+
+
+def _numbered(names: list, entries: list, track) -> str:
+    """Style names labelled with the numbers the user was just shown.
+
+    Looked up live rather than stored on the verdict, so a verdict restored from
+    the cache is labelled with this run's numbering rather than an older one.
+    """
+    lookup = {entry["name"]: entry["number"]
+              for entry in entries if entry["track"] == track}
+    return ", ".join(f"{lookup[name]}) {name}" if name in lookup else name
+                     for name in names)
+
+
+def _show_verdict(verdict: dict, cached: bool, entries: list) -> None:
     """Print what was chosen, in enough detail to judge it."""
     keep = verdict.get("keep", [])
     total = len(verdict.get("styles", []))
@@ -296,7 +332,7 @@ def _show_verdict(verdict: dict, cached: bool) -> None:
     source = "Cached selection" if cached else f"{verdict.get('model', 'Gemini')} chose"
     where = "" if verdict.get("track") is None else f"track {verdict['track']} and "
     print(f"  {source} {where}{len(keep)} of {total} style(s):")
-    _hint(f"    translate:   {', '.join(keep)}")
+    _hint(f"    translate:   {_numbered(keep, entries, verdict.get('track'))}")
     _hint(f"    passthrough: the other {others} style(s), untouched")
     if verdict.get("reason"):
         _hint(f"    reason:      {verdict['reason']}")
@@ -314,34 +350,39 @@ def _try_ai_selection(directory: Path, candidates: list, ai: dict):
     accepted exactly like a fresh one. That is what makes the cache safe without
     a flag to bypass it: nothing stale can be used without being seen first.
     """
-    from .classify import choose
+    from .classify import choose, enumerate_styles, usable_candidates
     from .manifest import load_style_verdict, save_style_verdict
 
-    if not candidates:
+    # Filtered here, not inside choose, so the numbers shown are the numbers sent.
+    usable = usable_candidates(candidates)
+    if not usable:
         return None
+    entries = enumerate_styles(usable)
 
     # The style list the verdict has to be valid against is the one from the
     # track it would apply to; with several tracks a cached verdict is matched
     # against whichever track it named.
     cached = None
-    for candidate in candidates:
+    for candidate in usable:
         styles = [fact["name"] for fact in candidate["styles"]]
         found = load_style_verdict(directory, styles)
         if found and found.get("track") == candidate["index"]:
             cached = found
             break
 
+    _show_evidence(usable)
+
     verdict = cached
     if verdict is None:
         print("  Asking Gemini to choose the track and styles...")
-        verdict = choose(candidates, ai.get("api_key", ""),
+        verdict = choose(usable, ai.get("api_key", ""),
                          instruction=ai.get("instruction", ""),
                          source_lang=cfg.get("SOURCE_LANGUAGE", "english"))
         if verdict is None:
             _warn("  Gemini could not choose - falling back to the usual prompts.")
             return None
 
-    _show_verdict(verdict, cached is not None)
+    _show_verdict(verdict, cached is not None, entries)
     answer = _ask_yes_no("  Use this selection?", True, allow_back=True)
     if answer is BACK:
         return BACK

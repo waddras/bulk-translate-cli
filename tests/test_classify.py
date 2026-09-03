@@ -98,10 +98,35 @@ def test_the_prompt_carries_the_evidence_and_the_contract():
     assert "Full Subtitles" in prompt, "track titles say plainly what a track is"
 
 
-def test_the_contract_asks_for_a_track_only_when_there_is_a_choice():
-    """Subtitle files have no track, so asking for one invites an invented value."""
-    assert "Set track to" in classify._output_contract(multi_track=True)
-    assert "Omit track" in classify._output_contract(multi_track=False)
+def test_the_contract_demands_numbers_not_names():
+    contract = classify._output_contract(multi_track=False)
+    assert "Return numbers, never names" in contract
+    assert "Never invent one" in contract
+
+
+def test_the_contract_pins_replies_to_one_track_only_when_there_is_a_choice():
+    assert "SAME track" in classify._output_contract(multi_track=True)
+    assert "SAME track" not in classify._output_contract(multi_track=False)
+
+
+def test_the_numbering_is_global_and_shared():
+    """The user is shown these numbers, so the payload must carry the same ones."""
+    two_tracks = [
+        {"index": 0, "styles": [{"name": "A", "cues": 9, "positioned": False,
+                                 "karaoke": False, "samples": []}]},
+        {"index": 1, "styles": [{"name": "B", "cues": 8, "positioned": False,
+                                 "karaoke": False, "samples": []},
+                                {"name": "C", "cues": 7, "positioned": False,
+                                 "karaoke": False, "samples": []}]},
+    ]
+    entries = classify.enumerate_styles(two_tracks)
+
+    assert [(e["number"], e["name"], e["track"]) for e in entries] == [
+        (1, "A", 0), (2, "B", 1), (3, "C", 1)]
+
+    payload = classify._payload(two_tracks)
+    assert payload["tracks"][0]["styles"][0]["n"] == 1
+    assert payload["tracks"][1]["styles"][1]["n"] == 3, "same numbering as above"
 
 
 def test_the_verdict_schema_is_not_the_translation_schema():
@@ -117,70 +142,108 @@ def test_the_verdict_schema_is_not_the_translation_schema():
 
 def test_a_good_reply_becomes_a_verdict():
     verdict = classify.validate(
-        {"track": 0, "dialogue_styles": ["Dialogue"], "reason": "hundreds of cues"},
-        _candidates())
+        {"dialogue_styles": [1], "reason": "hundreds of cues"}, _candidates())
 
-    assert verdict["track"] == 0
+    assert verdict["track"] == 0, "the number identifies the track too"
     assert verdict["keep"] == ["Dialogue"]
     assert verdict["passthrough"] == ["+ALL"], "the rest passes through untouched"
     assert verdict["reason"] == "hundreds of cues"
     assert verdict["styles"] == ["Dialogue", "Sign"], "recorded for cache checking"
 
 
-def test_an_invented_style_name_is_dropped():
-    verdict = classify.validate(
-        {"track": 0, "dialogue_styles": ["Dialogue", "MainDialogue"]}, _candidates())
-    assert verdict["keep"] == ["Dialogue"], "only styles the file really has"
+def test_a_number_that_was_not_offered_is_dropped():
+    verdict = classify.validate({"dialogue_styles": [1, 99]}, _candidates())
+    assert verdict["keep"] == ["Dialogue"], "only numbers that were offered"
 
 
-def test_a_reply_of_only_invented_styles_is_refused():
+def test_a_reply_of_only_bad_numbers_is_refused():
     """Refusing sends the user to the normal prompt. Widening would cost quota."""
-    assert classify.validate(
-        {"track": 0, "dialogue_styles": ["Nope", "AlsoNope"]}, _candidates()) is None
+    assert classify.validate({"dialogue_styles": [99, 0, -1]}, _candidates()) is None
 
 
-def test_an_unknown_track_is_refused():
+def test_style_names_are_refused_now_that_numbers_are_asked_for():
+    """The whole point of numbers is that a name can no longer be honoured."""
     assert classify.validate(
-        {"track": 7, "dialogue_styles": ["Dialogue"]}, _candidates()) is None
+        {"dialogue_styles": ["Dialogue"]}, _candidates()) is None
+
+
+def test_a_digit_string_is_accepted():
+    """"1" for 1 is a formatting slip of the same kind as wrong capitalisation."""
+    verdict = classify.validate({"dialogue_styles": ["1"]}, _candidates())
+    assert verdict["keep"] == ["Dialogue"]
+
+
+def test_true_is_not_style_number_one():
+    """bool is a subclass of int in Python, so this needs refusing explicitly."""
+    assert classify.validate({"dialogue_styles": [True]}, _candidates()) is None
 
 
 def test_an_empty_selection_is_refused():
-    assert classify.validate({"track": 0, "dialogue_styles": []}, _candidates()) is None
+    assert classify.validate({"dialogue_styles": []}, _candidates()) is None
 
 
 def test_a_reply_that_is_not_an_object_is_refused():
-    for reply in ("Dialogue", 3, None, [], {}, {"styles": ["Dialogue"]}):
+    for reply in ("Dialogue", 3, None, [], {}, {"styles": [1]}):
         assert classify.validate(reply, _candidates()) is None, reply
-
-
-def test_a_case_slip_is_tolerated_but_a_different_name_is_not():
-    """Echoing "dialogue" for "Dialogue" is a formatting slip, not an invention."""
-    verdict = classify.validate(
-        {"track": 0, "dialogue_styles": ["dialogue"]}, _candidates())
-    assert verdict["keep"] == ["Dialogue"], "matched back to the real name"
 
 
 def test_a_wrapped_or_listed_verdict_is_still_read():
     """Models asked for one object sometimes send [obj] or {"verdict": obj}."""
-    good = {"track": 0, "dialogue_styles": ["Dialogue"]}
+    good = {"dialogue_styles": [1]}
     assert classify.validate([good], _candidates())["keep"] == ["Dialogue"]
     assert classify.validate({"verdict": good}, _candidates())["keep"] == ["Dialogue"]
 
 
 def test_duplicates_are_collapsed():
-    verdict = classify.validate(
-        {"track": 0, "dialogue_styles": ["Dialogue", "Dialogue", "dialogue"]},
-        _candidates())
+    verdict = classify.validate({"dialogue_styles": [1, 1, "1"]}, _candidates())
     assert verdict["keep"] == ["Dialogue"]
 
 
-def test_subtitle_files_ignore_a_volunteered_track():
-    """There is no track to choose, so one offered anyway is noise, not an error."""
+def test_subtitle_files_have_no_track():
     candidates = [{"index": None, "styles": _candidates()[0]["styles"]}]
-    verdict = classify.validate(
-        {"track": 4, "dialogue_styles": ["Dialogue"]}, candidates)
+    verdict = classify.validate({"dialogue_styles": [1]}, candidates)
     assert verdict is not None
     assert verdict["track"] is None
+
+
+# ── A reply spanning two tracks narrows, never widens ─────────────────────────
+
+def _two_tracks():
+    def style(name, cues):
+        return {"name": name, "cues": cues, "positioned": False,
+                "karaoke": False, "samples": []}
+    return [
+        {"index": 0, "styles": [style("A", 9), style("B", 8)]},   # numbers 1, 2
+        {"index": 1, "styles": [style("C", 7)]},                  # number 3
+    ]
+
+
+def test_a_reply_mixing_tracks_keeps_the_track_with_the_most():
+    """Only one track gets extracted, and the union would widen the selection."""
+    verdict = classify.validate({"dialogue_styles": [1, 2, 3]}, _two_tracks())
+    assert verdict["track"] == 0
+    assert verdict["keep"] == ["A", "B"], "the lone track-1 style is dropped"
+
+
+def test_a_tie_across_tracks_goes_to_the_earlier_track():
+    verdict = classify.validate({"dialogue_styles": [2, 3]}, _two_tracks())
+    assert verdict["track"] == 0
+    assert verdict["keep"] == ["B"]
+
+
+def test_a_number_from_the_second_track_selects_that_track():
+    verdict = classify.validate({"dialogue_styles": [3]}, _two_tracks())
+    assert verdict["track"] == 1
+    assert verdict["keep"] == ["C"]
+    assert verdict["styles"] == ["C"], "cache check uses that track's styles"
+
+
+def test_candidates_without_styles_are_never_numbered():
+    """They are not sent, so numbering them would shift every other number."""
+    candidates = [{"index": 0, "styles": []}] + _two_tracks()
+    assert classify.usable_candidates(candidates) == _two_tracks()
+    verdict = classify.validate({"dialogue_styles": [1]}, candidates)
+    assert verdict["keep"] == ["A"]
 
 
 # ── The call ──────────────────────────────────────────────────────────────────
@@ -202,7 +265,7 @@ def test_choose_uses_the_pinned_model_and_never_paces(monkeypatch, isolated_sett
                         gen_config=None):
         seen["model"] = model
         seen["gen_config"] = gen_config
-        return {"track": 0, "dialogue_styles": ["Dialogue"]}
+        return {"dialogue_styles": [1]}
 
     def explode():
         raise AssertionError("a selection call must not pace")

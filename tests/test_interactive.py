@@ -327,3 +327,31 @@ def test_a_cached_verdict_skips_the_call_but_not_the_confirmation(
     assert ai_ready == [], "the verdict was cached, so no call was needed"
     assert len(runs) == 2, "and it still had to be confirmed to be used"
     assert runs[0]["keep_styles"] == ["Default"]
+
+
+
+def test_the_numbered_style_list_is_shown_before_the_call(series, answers,
+                                                          ai_ready, runs, capsys):
+    """The numbers shown must be the numbers sent, or comparing them is useless."""
+    answers(["sub", str(series), "1,2", "y", "", "y", "y", "n", "", "y"])
+    interactive.run_interactive(path=None)
+
+    output = capsys.readouterr().out
+    assert "1) Default" in output
+    assert "2) Signs" in output, "season 1's other style, numbered"
+
+    # The same numbering the model was given for that folder.
+    from btcli.classify import enumerate_styles
+    entries = enumerate_styles(ai_ready[0]["candidates"])
+    assert [(entry["number"], entry["name"]) for entry in entries] == \
+        [(1, "Default"), (2, "Signs")]
+
+
+def test_the_verdict_is_labelled_with_those_numbers(series, answers, ai_ready,
+                                                    runs, capsys):
+    answers(["sub", str(series), "1,2", "y", "", "y", "y", "n", "", "y"])
+    interactive.run_interactive(path=None)
+
+    output = capsys.readouterr().out
+    assert "translate:   1) Default" in output, \
+        "so the choice can be read against the list above it"

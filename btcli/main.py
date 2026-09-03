@@ -420,19 +420,27 @@ LETTING GEMINI CHOOSE
   quota. Each style is judged on its cue count, a few sample lines, and whether
   its cues carry \\pos (a sign) or \\k (karaoke) - names alone are a weak signal.
 
-  What it chose is always shown for you to accept or reject:
+  The numbered style list is printed first, and it is the same numbering the
+  model receives, so its answer can be read straight against it. The model
+  replies with NUMBERS, not names, which rules out case slips, reformatted names
+  and invented ones - a number is either offered or it is not.
 
-    Gemini chose track 0 and 2 of 41 style(s):
-      translate:   Base01, Nodame Primary
+    Track 0  [eng] ass  "English"
+    1) Base01          2) Base01 - Overlap   3) EdEnglish     4) NodameOP
+    5) NodameED        6) Nodame Primary     7) letter1       8) sign1
+    Asking Gemini to choose the track and styles...
+    gemini-3.5-flash-lite chose track 0 and 2 of 41 style(s):
+      translate:   1) Base01, 6) Nodame Primary
       passthrough: the other 39 style(s), untouched
       reason:      Base01 and Nodame Primary carry hundreds of conversational
                    cues; the rest are positioned signs or karaoke.
     Use this selection? [Y/n]
 
-  Nothing is taken on trust: a track or style name the file does not have is
-  discarded, and a reply with nothing usable left is dropped rather than widened
-  to "translate everything". Answer n, or let the call fail, and you get the
-  ordinary style prompt with nothing lost.
+  Nothing is taken on trust: a number that was not offered is discarded, a reply
+  spanning two tracks keeps only the track most of its numbers belong to, and a
+  reply with nothing valid left is dropped rather than widened to "translate
+  everything". Answer n, or let the call fail, and you get the ordinary style
+  prompt with nothing lost.
 
   The verdict is cached in that folder's .btcli.json and reused only while the
   styles on disk still match. A cached verdict still has to be confirmed, so
