@@ -82,6 +82,11 @@ btcli --check-settings           # validate and report
 btcli --strict --check-settings  # treat warnings as errors too
 ```
 
+Findings come at three levels. **Errors** always stop the run. **Warnings** mean
+it will run but not as intended, and stop it under `--strict`. **Notes** are
+worth knowing but need no action — a setting the code already corrects by itself
+— so they never block and never withhold the all-clear.
+
 ## Commands
 
 Every command takes `-p PATH` and defaults to the current directory. Run
@@ -100,6 +105,62 @@ btcli interactive
 btcli interactive -p /media/Show
 btcli interactive --dry-run     # ask everything, then report instead of running
 ```
+
+#### Letting Gemini pick the track and styles
+
+Interactive mode offers to choose for you. Useful on releases with forty styles
+(`sign1`–`sign10`, `NodameOP`, `EdEnglish`, `letter1`, `gyabo`) where picking by
+hand is guesswork.
+
+```
+Let Gemini choose the track and styles for you? [y/N]: y
+Instructions for Gemini [Enter for the default]:
+
+  FOLDER - Season 01  (12 file(s))
+  Track 0  [eng] ass  "Signs & Songs"  (forced)
+  1) sign1           2) NodameOP
+  Track 1  [eng] ass  "Full Subtitles"
+  1) Base01          2) Base01 - Overlap   3) EdEnglish      4) Nodame Primary
+  Asking Gemini to choose the track and styles...
+  gemini-3.5-flash-lite chose track 1, and 2 of 41 style(s):
+    translate:   1) Base01, 4) Nodame Primary
+    passthrough: the other 39 style(s), untouched
+    reason:      Track 1 is the full subtitle track; Base01 and Nodame Primary
+                 carry hundreds of conversational cues.
+  Use this selection? [Y/n]
+```
+
+**The track is the first decision**, and the more consequential one: pick "Signs
+& Songs" over "Full Subtitles" and every style choice after it is irrelevant. So
+every text track is offered, with its ffprobe metadata passed through whole —
+tags and disposition included, since `forced=1` is the clearest "signs only"
+marker there is. A plain-text track with no ASS styles is offered too; choosing
+it just means translating all of it.
+
+Style numbers **restart at 1 for each track**, so they only mean anything
+together with the track named, and cannot contradict it. The model replies with
+**numbers, not names**, which removes a whole class of errors: no case slips, no
+reformatted `Nodame Insert JP`, no invented `MainDialogue`.
+
+The list you see is printed from the same numbering the model receives, so its
+answer reads straight against it. Cue counts, `\pos`/`\k` flags and sample lines
+go in the request but stay out of that list — they are what the model judges
+styles on, and clutter for a human checking the result.
+
+One extra API call per folder, on the model pinned by `AI_SELECT_MODEL` so it
+never spends a translation model's daily quota.
+
+Nothing is taken on trust: a track index that does not exist is refused outright,
+a style number out of range for the chosen track is dropped, and a reply with
+nothing valid left is discarded rather than widened to "translate everything".
+Answer `n`, or let the call fail, and you get the normal style prompt with
+nothing lost.
+
+The verdict is cached in that folder's `.btcli.json` and reused only while the
+styles on disk still match, so a re-release with renamed styles gets a fresh
+one. A cached verdict still has to be confirmed — it saves the call, not the
+decision — so nothing stale can be used without you seeing it. Edit
+`AI_SELECT_PROMPT` to change what counts as dialogue for your library.
 
 ### `probe` — look, don't touch
 
@@ -226,10 +287,18 @@ A re-run therefore only sends what is still missing. Interrupt a job with
 Ctrl-C, or lose it to a rate limit, and starting it again picks up where it
 stopped.
 
-When a cache is found, btcli asks whether to resume or start fresh (once per
-run). Set `RESUME_PROMPT` to `false` to always resume silently; the prompt is
-skipped automatically when not running in a terminal. `USE_TRANSLATION_CACHE`
-turns the whole mechanism off, as does `--no-cache` for a single run.
+When lines cached by an **earlier** run are found, btcli asks once whether to
+resume or start fresh. It never asks about lines the current run translated
+minutes ago — seasons share a cache, so season 1 fills it and season 2 would
+otherwise be interrupted to ask permission to reuse the same run's own work. Nor
+does it ask once chunks have started going out: a job already under way silently
+resumes rather than stalling on a keypress nobody is there to press.
+
+Declining re-translates the lines from earlier runs and keeps what the current
+run has already paid for. Set `RESUME_PROMPT` to `false` to always resume
+silently; the prompt is skipped automatically when not running in a terminal.
+`USE_TRANSLATION_CACHE` turns the whole mechanism off, as does `--no-cache` for a
+single run.
 
 ### When a few lines refuse to translate
 
@@ -305,6 +374,14 @@ below are what btcli uses if you configure nothing.
 | `MODEL_POOL` | 4 flash models | Model ladder, merged with `GEMINI_MODEL` |
 | `GEMINI_MAX_OUTPUT_TOKENS` | `0` | `0` = let the model decide |
 | `GEMINI_RESPONSE_SCHEMA` | `true` | Pin the reply to `[{id, text}]`. Disable only if a model rejects schemas |
+
+### AI style selection (interactive mode only)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `AI_SELECT_STYLES` | `false` | Default answer to "let Gemini choose the track and styles?". You are asked either way |
+| `AI_SELECT_MODEL` | `gemini-3.5-flash-lite` | Model for that one call per folder. Pinned, so it never spends a translation model's quota |
+| `AI_SELECT_PROMPT` | see file | What counts as dialogue. The reply format is appended automatically and overrides it |
 
 ### Translation
 
@@ -486,6 +563,7 @@ btcli/
 ├── discover.py     # File discovery
 ├── probe.py        # Probe flow
 ├── auto.py         # --auto track and style detection
+├── classify.py     # Ask Gemini which track and styles are dialogue
 ├── extract.py      # ffmpeg extraction and track merging
 ├── manifest.py     # .btcli.json job records
 ├── cache.py        # .btcli-cache.json translation cache

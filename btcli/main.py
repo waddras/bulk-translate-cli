@@ -84,11 +84,13 @@ RESUME AND THE TRANSLATION CACHE (.btcli-cache.json)
   finish, not 500. Keyed by source text, so renaming files, reordering cues, or
   re-extracting a track cannot corrupt it. Use --no-cache to translate fresh.
 
-  When a cache is found you are asked once per run whether to resume or start
-  over, and the cache state is always reported in Phase 1 so it is never a
-  mystery whether resuming is in effect. Set RESUME_PROMPT false to always
-  resume without asking; the question is skipped automatically when not run
-  from a terminal.
+  When an EARLIER run's lines are found you are asked once whether to resume or
+  start over, and the cache state is always reported in Phase 1 so it is never
+  a mystery whether resuming is in effect. Lines this run just translated are
+  reused without asking, and nothing is asked once translating has begun, so an
+  unattended job cannot stall waiting for an answer. Declining re-translates the
+  earlier lines only. Set RESUME_PROMPT false to always resume without asking;
+  the question is skipped automatically when not run from a terminal.
 
   Seasons of one series share the cache, so repeated lines (openings, endings,
   catchphrases) are only ever translated once.
@@ -168,15 +170,19 @@ SEEING THE WORK FIRST
   -i sub for full numbers.
 
 CHECKING YOUR SETTINGS
-  settings.conf is validated before any work starts. Errors stop the run;
-  warnings are printed and the run continues, unless --strict is given.
+  settings.conf is validated before any work starts, at three levels:
+
+    error    the job cannot run correctly. Always stops the run.
+    warning  it will run, but not as intended. Stops it only with --strict.
+    note     worth knowing, nothing to do. Never stops anything.
 
     btcli --check-settings        validate and exit, doing no work
     btcli --strict translate ...  refuse to run if anything looks wrong
 
   Warnings catch quiet mistakes rather than crashes, for example a MODEL_POOL
-  that repeats a model, or a RETRY_ATTEMPTS lower than the number of models
-  configured.
+  that repeats a model, which shortens the retry ladder without saying so.
+  A RETRY_ATTEMPTS lower than the number of models is only a note, because it is
+  raised automatically and there is nothing for you to change.
 
 CONFIGURATION (first match wins)
   ./settings.conf                     current directory (careful: takes priority)
@@ -342,12 +348,14 @@ WHAT IT ASKS
   1. input type: vid (extract tracks from video) or sub (existing subtitles)
   2. path (press Enter for the current directory)
   3. which folders to translate, as a numbered list - skip whole seasons here
-  4. for each CHOSEN folder, it samples ONE file and asks:
+  4. whether Gemini should choose the track and styles, and on what instruction
+  5. for each CHOSEN folder, it samples ONE file and asks:
        - which subtitle track to use (bitmap tracks are shown but rejected)
        - which styles to translate, as a numbered list
-  5. force re-extraction? (default no)
-  6. files per API call? (default auto)
-  7. a summary, then Proceed? [Y/n]
+     With AI selection on, its choice is shown here for you to accept first.
+  6. force re-extraction? (default no)
+  7. files per API call? (default auto)
+  8. a summary, then Proceed? [Y/n]
 
   When every folder has finished, any lines still missing are reported once,
   with the choice to retry at a smaller chunk size, list the untranslated lines,
@@ -365,7 +373,8 @@ GOING BACK
 
     at the style prompt      returns to the track prompt for that folder
     at the track prompt      returns to the previous folder
-    at the first folder      returns to the folder picker
+    at the first folder      returns to the AI selection question
+    at the AI question       returns to the folder picker
     at the folder picker     returns to the path
     at force / files-per-call / the summary
                              returns one step back, and from force back into
@@ -400,6 +409,52 @@ STYLE SELECTION
     ALL,+karaoke    translate all styles, passthrough karaoke   (default)
     1,3,+ALL        translate styles 1 and 3, passthrough the rest
     +3              passthrough style 3
+
+LETTING GEMINI CHOOSE
+  Asked once, before the folder questions. Worth it on a release with forty
+  styles (sign1..sign10, NodameOP, EdEnglish, letter1) where picking by hand is
+  guesswork.
+
+  It costs ONE extra API call per folder, on the model pinned by
+  AI_SELECT_MODEL, so a selection never spends a translation model's daily
+  quota. Each style is judged on its cue count, a few sample lines, and whether
+  its cues carry \\pos (a sign) or \\k (karaoke) - names alone are a weak signal.
+
+  The TRACK is the first decision and the more consequential one: pick a
+  signs-and-songs track over the full subtitles and every style choice after it
+  is irrelevant. Every text track is offered, with its ffprobe metadata passed
+  through whole - tags and disposition included, since forced=1 is the clearest
+  "signs only" marker there is. A plain-text track with no ASS styles is offered
+  too; choosing it just means translating all of it.
+
+  Style numbers restart at 1 for each track, so they only mean anything with the
+  track named. The model replies with NUMBERS, not names, which rules out case
+  slips, reformatted names and invented ones.
+
+    Track 0  [eng] ass  "Signs & Songs"  (forced)
+    1) sign1           2) NodameOP
+    Track 1  [eng] ass  "Full Subtitles"
+    1) Base01          2) Base01 - Overlap   3) EdEnglish     4) Nodame Primary
+    Asking Gemini to choose the track and styles...
+    gemini-3.5-flash-lite chose track 1, and 2 of 41 style(s):
+      translate:   1) Base01, 4) Nodame Primary
+      passthrough: the other 39 style(s), untouched
+      reason:      Track 1 is the full subtitle track; Base01 and Nodame Primary
+                   carry hundreds of conversational cues.
+    Use this selection? [Y/n]
+
+  Nothing is taken on trust: a track index that does not exist is refused, a
+  style number out of range for the chosen track is dropped, and a reply with
+  nothing valid left is discarded rather than widened to "translate everything".
+  Answer n, or let the call fail, and you get the ordinary style prompt with
+  nothing lost.
+
+  The verdict is cached in that folder's .btcli.json and reused only while the
+  styles on disk still match. A cached verdict still has to be confirmed, so
+  nothing stale is ever used without you seeing it.
+
+  AI_SELECT_STYLES sets the default answer; AI_SELECT_PROMPT is the default
+  instruction. Edit that to change what counts as dialogue for your library.
 
 WHEN A FOLDER HAS NO TRACKS
   If a video has no subtitle tracks but subtitle files sit beside it, you are

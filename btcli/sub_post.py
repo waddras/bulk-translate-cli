@@ -359,6 +359,24 @@ def build_srt_output(blocks: list) -> str:
 
 # ── Main Reassembly ───────────────────────────────────────────────────────────
 
+def _passthrough_cue_count(source_path: Path, passthrough_styles) -> int:
+    """How many of the source's cues belong to a passthrough style.
+
+    Used to tell a file with nothing to translate (every style passed through,
+    so there is still content to write) from one that is genuinely empty. An
+    unreadable source counts as zero: it will fail loudly further along rather
+    than here.
+    """
+    if not passthrough_styles:
+        return 0
+    try:
+        subs = pysubs2.SSAFile.load(str(source_path))
+    except Exception:
+        return 0
+    wanted = set(passthrough_styles)
+    return sum(1 for event in subs if getattr(event, "style", None) in wanted)
+
+
 def reassemble_files(translated_blob: dict, meta: dict, files: list,
                      suffix: str = ".ar", force_srt: bool = False,
                      kept_styles: list | None = None,
@@ -391,17 +409,28 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
         if selected_indices is not None and file_idx not in selected_indices:
             continue
         fpath = Path(str(files[file_idx - 1]))
-        if not cues:
-            log.detail(f"  No cues for {fpath.name} - skipping")
-            warnings.append(f"{fpath.name}: no cues found")
-            continue
 
-        log.detail(f"  Writing: {fpath.name} ({len(cues)} cues)")
-
-        # Resolve output path first — the RTL line separator depends on format.
+        # Resolve output path first — the RTL line separator depends on format,
+        # and whether passthrough content can be carried over depends on it too.
         out_path = resolve_output_path(fpath, suffix=suffix, force_srt=force_srt)
         is_ass = out_path.suffix.lower() == ".ass" and not force_srt
         line_sep = r"\N" if is_ass else "\n"
+
+        if not cues:
+            # No meta cues does not have to mean an empty file: every style may
+            # be in the passthrough list, so there is nothing to translate but
+            # plenty to write. build_ass_output carries those cues over from the
+            # source untouched. SRT has no styles, so it has nothing to carry.
+            carried = (_passthrough_cue_count(fpath, passthrough_styles)
+                       if is_ass else 0)
+            if not carried:
+                log.detail(f"  No cues for {fpath.name} - skipping")
+                warnings.append(f"{fpath.name}: no cues found")
+                continue
+            log.detail(f"  Writing: {fpath.name} - {carried} passthrough cue(s), "
+                       f"nothing to translate")
+        else:
+            log.detail(f"  Writing: {fpath.name} ({len(cues)} cues)")
 
         cues.sort(key=lambda x: x[1]["block_idx"])
         untranslated = []
@@ -443,8 +472,10 @@ def reassemble_files(translated_blob: dict, meta: dict, files: list,
             log.info(f"  {out_path.name}: {len(blocks) - len(untranslated)}/{len(blocks)} translated, "
                      f"{len(untranslated)} kept as original")
             warnings.append(f"{out_path.name}: {len(untranslated)} lines untranslated")
-        else:
+        elif blocks:
             log.info(f"  {out_path.name}: {len(blocks)} cues (fully translated)")
+        else:
+            log.info(f"  {out_path.name}: written with passthrough cues only")
 
         completed.append(out_path.name)
 

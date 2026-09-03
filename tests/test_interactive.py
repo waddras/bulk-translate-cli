@@ -117,13 +117,15 @@ def test_full_flow_with_back_at_every_step(series, answers, monkeypatch):
         lambda **kw: (calls.append(kw), {"missing": {}, "path": kw["path"]})[1])
 
     answers([
+        "sub",
+        "b",                 # back from the path to the input type
         "sub", str(series),
-        "b",                 # back to input type
-        "sub", str(series),
-        "ALL",
         "b",                 # back from the folder picker to the path
         str(series),
         "1,2",
+        "b",                 # back from the AI question to the folder picker
+        "1,2",
+        "n",                 # no, choose the styles by hand
         "1",                 # season 1 styles
         "b",                 # back at season 2 styles -> redo season 1
         "2",
@@ -148,6 +150,7 @@ def test_summary_can_edit_and_drop_folders(series, answers, monkeypatch):
 
     answers([
         "sub", str(series), "1,2",
+        "n",            # no AI selection
         "1",            # season 1 styles
         "1",            # season 2 styles
         "n", "",        # force, files-per-call
@@ -171,6 +174,184 @@ def test_cancelling_the_summary_writes_nothing(series, answers, monkeypatch):
     monkeypatch.setattr(
         "btcli.translate.run_translate",
         lambda **kw: calls.append(kw))
-    answers(["sub", str(series), "1,2", "1", "1", "n", "", "n"])
+    answers(["sub", str(series), "1,2", "n", "1", "1", "n", "", "n"])
     interactive.run_interactive(path=None)
     assert calls == []
+
+
+
+# ── Letting Gemini choose ─────────────────────────────────────────────────────
+#
+# The question is asked once for the run; the call happens per folder. Every
+# failure path has the same fallback — the ordinary style prompt — because in a
+# guided flow the person is sitting right there.
+
+
+@pytest.fixture
+def ai_ready(monkeypatch):
+    """Give interactive mode a key, and a stand-in for the selection call.
+
+    Returns the call log. Each canned verdict names the busiest style of
+    whichever candidate it was given, so it stays valid for any fixture.
+    """
+    monkeypatch.setattr("btcli.translate._resolve_api_key", lambda dry_run: "test-key")
+
+    calls = []
+
+    def fake_choose(candidates, api_key, **kwargs):
+        calls.append({"candidates": candidates, "instruction": kwargs.get("instruction")})
+        available = [fact["name"] for fact in candidates[0]["styles"]]
+        return {"track": candidates[0].get("index"), "keep": [available[0]],
+                "passthrough": ["+ALL"], "reason": "most cues by far",
+                "styles": available, "model": "test-model"}
+
+    monkeypatch.setattr("btcli.classify.choose", fake_choose)
+    return calls
+
+
+@pytest.fixture
+def runs(monkeypatch):
+    """Capture what run_translate was asked to do."""
+    calls = []
+    monkeypatch.setattr(
+        "btcli.translate.run_translate",
+        lambda **kw: (calls.append(kw), {"missing": {}, "path": kw["path"]})[1])
+    return calls
+
+
+def test_an_accepted_verdict_becomes_the_plan(series, answers, ai_ready, runs):
+    answers([
+        "sub", str(series), "1,2",
+        "y", "",         # yes to AI selection, default instruction
+        "y",             # accept season 1's verdict
+        "y",             # accept season 2's verdict
+        "n", "",         # force, files-per-call
+        "y",             # proceed
+    ])
+    interactive.run_interactive(path=None)
+
+    assert len(ai_ready) == 2, "one call per folder, not one per run"
+    assert len(runs) == 2
+    assert runs[0]["keep_styles"] == ["Default"]
+    assert runs[0]["passthrough_styles"] == ["+ALL"], "the rest passes through"
+
+
+def test_the_default_instruction_is_sent_when_none_is_given(series, answers,
+                                                            ai_ready, runs):
+    answers(["sub", str(series), "1,2", "y", "", "y", "y", "n", "", "y"])
+    interactive.run_interactive(path=None)
+
+    sent = ai_ready[0]["instruction"]
+    assert "actual dialogue" in sent
+    assert "no openings and no endings" in sent
+
+
+def test_a_custom_instruction_is_sent_verbatim(series, answers, ai_ready, runs):
+    answers([
+        "sub", str(series), "1,2",
+        "y", "only the main speaking parts",
+        "y", "y",
+        "n", "", "y",
+    ])
+    interactive.run_interactive(path=None)
+    assert ai_ready[0]["instruction"] == "only the main speaking parts"
+
+
+def test_declining_a_verdict_falls_back_to_the_style_prompt(series, answers,
+                                                            ai_ready, runs):
+    answers([
+        "sub", str(series), "1,2",
+        "y", "",
+        "n", "2",        # reject season 1's verdict, pick style 2 by hand
+        "n", "2",        # same for season 2
+        "n", "", "y",
+    ])
+    interactive.run_interactive(path=None)
+
+    assert len(runs) == 2
+    assert runs[0]["keep_styles"] == ["Signs"], "the hand-picked style wins"
+
+
+def test_a_failed_call_falls_back_without_asking(series, answers, monkeypatch, runs):
+    """A refused call must not cost the user an extra question."""
+    monkeypatch.setattr("btcli.translate._resolve_api_key", lambda dry_run: "test-key")
+    monkeypatch.setattr("btcli.classify.choose", lambda *a, **k: None)
+
+    answers([
+        "sub", str(series), "1,2",
+        "y", "",
+        "2",             # straight to the style prompt, no confirmation asked
+        "2",
+        "n", "", "y",
+    ])
+    interactive.run_interactive(path=None)
+
+    assert len(runs) == 2
+    assert runs[0]["keep_styles"] == ["Signs"]
+
+
+def test_no_api_key_falls_back_without_asking(series, answers, monkeypatch, runs):
+    """Reported once, up front, rather than silently per folder."""
+    monkeypatch.setattr("btcli.translate._resolve_api_key", lambda dry_run: "")
+
+    answers([
+        "sub", str(series), "1,2",
+        "y", "",         # asked, but there is no key
+        "2", "2",        # so the ordinary prompts run
+        "n", "", "y",
+    ])
+    interactive.run_interactive(path=None)
+    assert runs[0]["keep_styles"] == ["Signs"]
+
+
+def test_saying_no_never_calls_the_api(series, answers, ai_ready, runs):
+    answers(["sub", str(series), "1,2", "n", "1", "1", "n", "", "y"])
+    interactive.run_interactive(path=None)
+    assert ai_ready == [], "declining the offer must not spend a call"
+
+
+def test_a_cached_verdict_skips_the_call_but_not_the_confirmation(
+        series, answers, ai_ready, runs):
+    """The cache saves the call, not the decision — nothing stale goes unseen."""
+    answers(["sub", str(series), "1,2", "y", "", "y", "y", "n", "", "y"])
+    interactive.run_interactive(path=None)
+    assert len(ai_ready) == 2
+    assert (series / "Season 01" / ".btcli.json").exists()
+
+    # Same folders again, in a second session.
+    ai_ready.clear()
+    runs.clear()
+    answers(["sub", str(series), "1,2", "y", "", "y", "y", "n", "", "y"])
+    interactive.run_interactive(path=None)
+
+    assert ai_ready == [], "the verdict was cached, so no call was needed"
+    assert len(runs) == 2, "and it still had to be confirmed to be used"
+    assert runs[0]["keep_styles"] == ["Default"]
+
+
+
+def test_the_numbered_style_list_is_shown_before_the_call(series, answers,
+                                                          ai_ready, runs, capsys):
+    """The numbers shown must be the numbers sent, or comparing them is useless."""
+    answers(["sub", str(series), "1,2", "y", "", "y", "y", "n", "", "y"])
+    interactive.run_interactive(path=None)
+
+    output = capsys.readouterr().out
+    assert "1) Default" in output
+    assert "2) Signs" in output, "season 1's other style, numbered"
+
+    # The same numbering the model was given for that folder.
+    from btcli.classify import enumerate_styles
+    entries = enumerate_styles(ai_ready[0]["candidates"])
+    assert [(entry["number"], entry["name"]) for entry in entries] == \
+        [(1, "Default"), (2, "Signs")]
+
+
+def test_the_verdict_is_labelled_with_those_numbers(series, answers, ai_ready,
+                                                    runs, capsys):
+    answers(["sub", str(series), "1,2", "y", "", "y", "y", "n", "", "y"])
+    interactive.run_interactive(path=None)
+
+    output = capsys.readouterr().out
+    assert "translate:   1) Default" in output, \
+        "so the choice can be read against the list above it"

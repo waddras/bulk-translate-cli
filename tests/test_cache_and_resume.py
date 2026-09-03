@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 
 from btcli.cache import TranslationCache, series_root_for
 from btcli.translate import run_translate
@@ -202,3 +203,152 @@ def test_passthrough_writes_files_without_calling_the_api(
     output = folder / "e01.ar.ass"
     assert output.exists()
     assert len(untranslated_lines(output)) == 2, "failed lines stay in the source language"
+
+
+# ── The resume prompt must never interrupt a running job ──────────────────────
+#
+# The cache is shared by every season of a series and grows as the run goes, so
+# "the cache knows this line" stops meaning "an earlier run translated it" the
+# moment the current run stores anything. Getting that wrong made the prompt
+# appear during season 2 of an unattended three-season job and stall it on a
+# keypress. See docs/PROJECT-STATE.md.
+
+
+def _new_process():
+    """Forget the state that only exists for the lifetime of a process."""
+    from btcli import cache as cache_module
+    from btcli import translate as translate_module
+
+    translate_module.reset_resume_choice()
+    cache_module.reset_snapshots()
+
+
+@pytest.fixture
+def resume_prompt(monkeypatch):
+    """Make the resume prompt reachable and record every time it is asked.
+
+    Also records whether chunks had already gone out when the question was put,
+    which is the property that actually matters: a prompt after that point is a
+    stalled job.
+    """
+    from btcli import prompts
+    from btcli import translate as translate_module
+
+    record = {"asked": 0, "started_when_asked": [], "answer": True}
+
+    def fake_ask(question, default=True, allow_back=False):
+        record["asked"] += 1
+        record["started_when_asked"].append(translate_module._work_started)
+        return record["answer"]
+
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "ask_yes_no", fake_ask)
+    return record
+
+
+def test_snapshot_ignores_lines_this_process_added(tmp_path):
+    """The heart of the fix: reopening the cache must not relabel our own work."""
+    first = TranslationCache(tmp_path, "arabic")
+    first.store_and_flush({"a": "one"}, {"a": "واحد"})
+
+    second = TranslationCache(tmp_path, "arabic")
+    assert second.loaded == 1, "the entry is on disk and must still be reused"
+    assert second.preexisting == frozenset(), "but it did not predate the process"
+    assert second.from_earlier_run({"a": "one"}) == set()
+
+
+def test_snapshot_counts_lines_from_a_previous_process(tmp_path):
+    TranslationCache(tmp_path, "arabic").store_and_flush({"a": "one"}, {"a": "واحد"})
+    _new_process()
+    assert TranslationCache(tmp_path, "arabic").from_earlier_run({"a": "one"}) == {"a"}
+
+
+def test_fresh_series_never_asks_across_seasons(
+        tmp_path, ass_factory, fake_translator, isolated_settings, resume_prompt):
+    """The reported bug: season 1 fills the shared cache, season 2 prompted."""
+    isolated_settings["RESUME_PROMPT"] = True
+    show = tmp_path / "Show"
+    ass_factory(show / "Season 01" / "e01.en.ass",
+                [("Default", "Yes."), ("Default", "Thank you."),
+                 ("Default", "season one only")])
+    ass_factory(show / "Season 02" / "e01.en.ass",
+                [("Default", "Yes."), ("Default", "Thank you."),
+                 ("Default", "season two only")])
+
+    fake_translator()
+    run_translate(path=str(show / "Season 01"), input_type="sub", lang="arabic")
+    run_translate(path=str(show / "Season 02"), input_type="sub", lang="arabic")
+
+    assert resume_prompt["asked"] == 0, "nothing here predates this run"
+    assert (show / ".btcli-cache.json").exists(), "the seasons did share a cache"
+
+
+def test_real_rerun_asks_once_before_anything_is_sent(
+        tmp_path, ass_factory, fake_translator, isolated_settings, resume_prompt):
+    isolated_settings["RESUME_PROMPT"] = True
+    folder = tmp_path / "Show" / "Season 01"
+    ass_factory(folder / "e01.en.ass", [("Default", "one"), ("Default", "two")])
+
+    fake_translator()
+    run_translate(path=str(folder), input_type="sub", lang="arabic")
+    assert resume_prompt["asked"] == 0, "a first run has nothing to resume"
+
+    _new_process()
+    ass_factory(folder / "e01.en.ass",
+                [("Default", "one"), ("Default", "two"), ("Default", "three")])
+    run_translate(path=str(folder), input_type="sub", lang="arabic")
+
+    assert resume_prompt["asked"] == 1
+    assert resume_prompt["started_when_asked"] == [False], \
+        "the question must come before any chunk is dispatched"
+
+
+def test_no_prompt_once_chunks_have_gone_out(
+        tmp_path, ass_factory, fake_translator, isolated_settings, resume_prompt):
+    """A re-run whose first batch is all-new lines must still not stall later."""
+    isolated_settings["RESUME_PROMPT"] = True
+    isolated_settings["FILES_PER_BATCH"] = 1          # one batch per file
+    folder = tmp_path / "Show" / "Season 01"
+
+    # An earlier process translated e02 only, so "shared" predates the re-run.
+    ass_factory(folder / "e02.en.ass", [("Default", "shared")])
+    fake_translator()
+    run_translate(path=str(folder), input_type="sub", lang="arabic")
+
+    _new_process()
+    # e01 sorts first and has nothing cached, so batch 1 sends without asking;
+    # batch 2 is the one holding the pre-existing line.
+    ass_factory(folder / "e01.en.ass", [("Default", "brand new")])
+    state = fake_translator()
+    state["sent"].clear()
+    run_translate(path=str(folder), input_type="sub", lang="arabic")
+
+    assert resume_prompt["asked"] == 0, "the run was already committed"
+    assert state["sent"] == [1], "batch 1 sent its new line, batch 2 reused the cache"
+
+
+def test_declining_spares_the_lines_this_run_just_translated(
+        tmp_path, ass_factory, fake_translator, isolated_settings, resume_prompt):
+    """Declining distrusts the old cache, not the work of the past five minutes."""
+    isolated_settings["RESUME_PROMPT"] = True
+    isolated_settings["FILES_PER_BATCH"] = 1
+    folder = tmp_path / "Show" / "Season 01"
+
+    # An earlier process translated "old" and nothing else.
+    ass_factory(folder / "e01.en.ass", [("Default", "old")])
+    fake_translator()
+    run_translate(path=str(folder), input_type="sub", lang="arabic")
+
+    _new_process()
+    # Now both files hold "old" and "fresh". Only "old" predates this run, so
+    # "fresh" reaches the cache purely through batch 1 of this very run.
+    ass_factory(folder / "e01.en.ass", [("Default", "old"), ("Default", "fresh")])
+    ass_factory(folder / "e02.en.ass", [("Default", "old"), ("Default", "fresh")])
+    resume_prompt["answer"] = False
+    state = fake_translator()
+    state["sent"].clear()
+    run_translate(path=str(folder), input_type="sub", lang="arabic")
+
+    assert resume_prompt["asked"] == 1, "answered once, remembered after that"
+    assert state["sent"] == [2, 1], \
+        "batch 2 re-sends only the pre-existing line, not batch 1's work"

@@ -162,23 +162,45 @@ def _detect_show_name(files: list) -> str:
 # Asked at most once per process: a series with many season folders should not
 # ask the same question for every folder.
 #
-# KNOWN BUG (docs/PROJECT-STATE.md, open item 1): this latches only when the
-# question is actually asked, and it is only asked when the cache has relevant
-# hits. On a fresh series the first season finds an empty cache, so nothing
-# latches; it then fills the shared cache, and the second season's common lines
-# trigger the prompt MID-RUN. Agreed fix is to compare against a snapshot of the
-# cache taken before the run started, so "translated in an earlier run" is true.
+# Two guards keep this from interrupting an unattended job, because the question
+# is only reached once a batch actually has cache hits, and that can happen for
+# the first time long after the run began:
+#
+#   * The hits must predate the process (cache.from_earlier_run). A run grows the
+#     shared cache as it goes, so season 1 fills it and season 2 would otherwise
+#     mistake this run's own work for an earlier run's.
+#   * Nothing may be asked once chunks have gone out (_work_started). Even with
+#     the snapshot, a re-run whose first batch happens to be all-new lines would
+#     reach the question at batch 2 — with the run already committed and nobody
+#     watching. Reuse is assumed there, which is the prompt's own default.
 _resume_choice: bool | None = None
+
+# Flipped the moment the first chunk is dispatched. One-way: a run that has
+# started sending must never stall on a keypress.
+_work_started: bool = False
 
 
 def reset_resume_choice() -> None:
-    """Forget the resume answer, so the next job asks again."""
-    global _resume_choice
+    """Forget the resume answer and the work-started latch, so the next job asks."""
+    global _resume_choice, _work_started
     _resume_choice = None
+    _work_started = False
 
 
-def _ask_resume(cached: int, missing: int, cache_path) -> bool:
-    """Ask whether to reuse cached lines. Remembered for the rest of the run."""
+def mark_work_started() -> None:
+    """Record that chunks have been dispatched, silencing the resume prompt."""
+    global _work_started
+    _work_started = True
+
+
+def _ask_resume(earlier: int, missing: int, total: int, cache_path) -> bool:
+    """Ask whether to reuse lines cached by an earlier run.
+
+    Remembered for the rest of the process. *earlier* counts only lines that
+    predate this run, *missing* is what would actually be sent if resuming, and
+    *total* is every unique line in the batch — so the three numbers shown are
+    the real ones and do not have to add up to each other.
+    """
     global _resume_choice
     if _resume_choice is not None:
         return _resume_choice
@@ -189,19 +211,26 @@ def _ask_resume(cached: int, missing: int, cache_path) -> bool:
         _resume_choice = True
         return True
 
-    total = cached + missing
-    percent = round(cached / total * 100) if total else 0
+    if _work_started:
+        # Deliberately not latched: this is not the user's answer, so a later
+        # batch is still free to ask if it somehow gets the chance.
+        log.detail("  Reusing lines cached by an earlier run without asking - "
+                   "translation is already under way")
+        return True
+
+    percent = round(earlier / total * 100) if total else 0
     from .prompts import header
     header("CACHED TRANSLATIONS FOUND")
-    print(f"  {cached} of {total} line(s) ({percent}%) were already translated "
+    print(f"  {earlier} of {total} line(s) ({percent}%) were already translated "
           f"in an earlier run.")
     hint(f"  Cache: {cache_path}")
     hint("  Resuming sends only the missing lines. Declining re-translates "
-         "everything and costs full quota.")
+         "them and costs full quota.")
     _resume_choice = ask_yes_no(
         f"  Resume and translate only the {missing} missing line(s)?", True)
     if not _resume_choice:
-        log.warning("  Ignoring cached lines for this run - translating everything.")
+        log.warning("  Ignoring lines cached by earlier runs - translating those "
+                    "again. Work done by this run is still reused.")
     return _resume_choice
 
 
@@ -755,15 +784,26 @@ def _build_batch_blob(files: list, keep_styles: list | None, record_failure) -> 
     return meta, payload, stats
 
 
-def _report_cache_state(cache, cached_hits: dict, to_translate: dict,
-                        declined: bool) -> None:
-    """Always say what the cache did, so resuming is never a mystery."""
-    if declined:
-        log.info(f"CACHE: {cache.loaded} cached line(s) ignored by choice; "
-                 f"translating all {len(to_translate)} line(s) fresh")
+def _report_cache_state(cache, cached_hits: dict, to_translate: dict, *,
+                        earlier: int, ignored: int) -> None:
+    """Always say what the cache did, so resuming is never a mystery.
+
+    The headline counts every reused line, since that is what determines the
+    quota spend. The earlier-run/this-run split goes underneath as detail: it
+    matters for understanding the resume prompt but not for the decision.
+    """
+    if ignored:
+        log.info(f"CACHE: {ignored} line(s) from an earlier run ignored by "
+                 f"choice; {len(to_translate)} line(s) to translate")
+        if cached_hits:
+            log.detail(f"  Still reusing {len(cached_hits)} line(s) this run "
+                       f"translated a moment ago")
     elif cached_hits:
         log.info(f"CACHE: {len(cached_hits)} line(s) already translated, "
                  f"{len(to_translate)} still to translate")
+        if earlier != len(cached_hits):
+            log.detail(f"  {earlier} from an earlier run, "
+                       f"{len(cached_hits) - earlier} from this run")
         log.detail(f"  Cache file: {cache.path}")
     elif cache.loaded:
         log.info(f"CACHE: {cache.loaded} entry(ies) on file, none match this "
@@ -779,6 +819,10 @@ def _resolve_cache(*, files, payload, target_lang, use_cache, write_only,
 
     Returns (cache, cached_hits, to_translate). cache is None when caching is
     off, in which case nothing is read from or written to disk.
+
+    Declining the resume prompt moves the lines cached by earlier runs back into
+    to_translate and leaves the rest alone, so "don't trust the old cache" does
+    not also mean "re-buy what this run translated five minutes ago".
     """
     if not (use_cache and cfg.get("USE_TRANSLATION_CACHE", True)):
         if not use_cache:
@@ -789,15 +833,26 @@ def _resolve_cache(*, files, payload, target_lang, use_cache, write_only,
     cache = TranslationCache(series_root_for(files), target_lang)
     cached_hits, to_translate = cache.split(payload)
 
+    # Only hits that predate this process are the resume prompt's business; see
+    # the resume-decision comment above.
+    earlier_tags = cache.from_earlier_run({tag: payload[tag] for tag in cached_hits})
+
     # Offer to resume. Asked once per run, and never during a retry or
     # passthrough pass, which are already an answer to this question.
-    declined = False
-    if cached_hits and allow_resume_prompt and not write_only:
-        if not _ask_resume(len(cached_hits), len(to_translate), cache.path):
-            declined = True
-            cached_hits, to_translate = {}, payload
+    ignored = 0
+    if earlier_tags and allow_resume_prompt and not write_only:
+        if not _ask_resume(len(earlier_tags), len(to_translate), len(payload),
+                           cache.path):
+            # Declining distrusts what was on disk before the run started, not
+            # the lines this run has just paid for. Re-sending those would spend
+            # quota twice inside one job to no purpose.
+            ignored = len(earlier_tags)
+            for tag in earlier_tags:
+                cached_hits.pop(tag, None)
+                to_translate[tag] = payload[tag]
 
-    _report_cache_state(cache, cached_hits, to_translate, declined)
+    _report_cache_state(cache, cached_hits, to_translate,
+                        earlier=len(earlier_tags) - ignored, ignored=ignored)
     return cache, cached_hits, to_translate
 
 
@@ -862,6 +917,10 @@ def _send_chunks(*, chunks, payload, api_key, show_name, source_lang,
 
     if not chunks:
         return {}
+
+    # The run is now committed to spending quota. From here no prompt may block
+    # it, however many batches or folders are still to come.
+    mark_work_started()
 
     fresh: dict = {}
     log.start_progress("Translating", total=len(chunks))

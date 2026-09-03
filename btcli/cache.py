@@ -21,6 +21,20 @@ HOW A JOB USES IT
        translations is durable before the next request goes out.
     3. ``loaded`` and ``added`` drive the reporting, so it is always visible
        whether resuming was in effect.
+    4. ``from_earlier_run()`` answers "was this line here before I started?",
+       which is what the resume prompt is really asking about.
+
+FIRST-OPEN SNAPSHOT
+    A run opens this file many times — once per batch of files, and once per
+    folder in interactive mode — and each open re-reads a file the run itself
+    has been growing. So "the cache contains this line" is NOT the same question
+    as "this line came from an earlier run", and only the second one is worth
+    prompting a human about.
+
+    ``_snapshots`` records the key set each cache file held the FIRST time this
+    process opened it, and is never refreshed. Without it, season 1 fills the
+    shared cache and season 2 mistakes its own run's work for an earlier run's,
+    which is what used to make the resume prompt fire mid-run.
 
 FILE SHAPE
     {
@@ -53,6 +67,32 @@ CACHE_VERSION = 1
 
 # Folder names that are a season of a series rather than the series itself.
 _SEASON_RE = re.compile(r"^(?:season|series|saison|s)[\s._-]*\d+$|^\d{1,2}$", re.IGNORECASE)
+
+# (resolved cache path, language) → keys held the first time this process
+# opened that file. See FIRST-OPEN SNAPSHOT in the module docstring.
+_snapshots: dict = {}
+
+
+def reset_snapshots() -> None:
+    """Forget every first-open snapshot, so the next open is treated as the first.
+
+    Only meaningful between tests: within a real run the snapshots must survive
+    for the whole process, which is the entire point of them.
+    """
+    _snapshots.clear()
+
+
+def _register_snapshot(path: Path, target_lang: str, entries: dict) -> frozenset:
+    """Return the first-open key set for this cache file, registering it if new.
+
+    Deliberately does not refresh an existing entry: a second TranslationCache
+    for the same file is reading a file this run has already added to, and
+    treating those additions as pre-existing is the bug this guards against.
+    """
+    key = (str(Path(path).resolve()), target_lang)
+    if key not in _snapshots:
+        _snapshots[key] = frozenset(entries)
+    return _snapshots[key]
 
 
 def _now() -> str:
@@ -114,6 +154,10 @@ class TranslationCache:
         self._loaded_count = 0
         self._added = 0
         self._load()
+        # Registered after loading and only once per process, so this stays the
+        # state before the run began even on the tenth open of the same file.
+        self._preexisting = _register_snapshot(self.path, self.target_lang,
+                                               self._entries)
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -187,6 +231,17 @@ class TranslationCache:
                 cached[tag] = hit
         return cached, missing
 
+    def from_earlier_run(self, payload: dict) -> set:
+        """Tags in {tag: source} whose translation predates this process.
+
+        This is the set the resume prompt may speak for. Anything outside it was
+        translated by the run that is happening right now, so describing it as
+        "from an earlier run" would be false and asking about it would mean
+        interrupting a run to ask permission to reuse its own work.
+        """
+        return {tag for tag, source in payload.items()
+                if _key(source) in self._preexisting}
+
     def store(self, payload: dict, translated: dict) -> int:
         """Record translations, keyed by their source text. Returns new entries.
 
@@ -248,8 +303,18 @@ class TranslationCache:
 
     @property
     def loaded(self) -> int:
-        """Entries that were already on disk when the job started."""
+        """Entries that were already on disk when this cache object was opened."""
         return self._loaded_count
+
+    @property
+    def preexisting(self) -> frozenset:
+        """Keys on disk when this process FIRST opened this cache file.
+
+        Differs from ``loaded`` from the second batch onwards: ``loaded`` counts
+        what this object read, which includes lines the current run has since
+        contributed.
+        """
+        return self._preexisting
 
     @property
     def added(self) -> int:

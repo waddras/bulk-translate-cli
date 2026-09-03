@@ -49,12 +49,26 @@ def isolated_settings():
 
 @pytest.fixture(autouse=True)
 def reset_resume_choice():
-    """Clear the once-per-run resume answer between tests."""
+    """Clear the once-per-run resume answer and work-started latch between tests."""
     from btcli import translate
 
     translate.reset_resume_choice()
     yield
     translate.reset_resume_choice()
+
+
+@pytest.fixture(autouse=True)
+def reset_cache_snapshots():
+    """Forget first-open cache snapshots, so each test starts as a fresh process.
+
+    Without this, a test whose tmp_path cache was opened by an earlier test would
+    inherit that snapshot and disagree about which lines predate the run.
+    """
+    from btcli import cache
+
+    cache.reset_snapshots()
+    yield
+    cache.reset_snapshots()
 
 
 @pytest.fixture(autouse=True)

@@ -1,6 +1,8 @@
 # btcli — project state
 
-Paste this into a new chat as context. Current as of commit `6b477b9` on `main`.
+Paste this into a new chat as context. Describes `main`; no commit hash, because
+a doc cannot name the commit that contains it and the reference always went
+stale. Use `git log --oneline -5` for where `main` actually is.
 
 ## What this is
 
@@ -12,17 +14,19 @@ Only this repo is relevant. The `waddras/bulk-translate` web-UI repo is retired.
 
 ## Working preferences
 
-- **Discuss first, never auto-code.** When a bug is reported or a change
-  discussed, only discuss it. Ask "want me to code this?" and wait for an
-  explicit "code" / "yes" / "go".
+- **Diagnosed items: just fix them and commit.** Anything already worked out and
+  written down here does not need re-confirming — implement it, test it, push it.
+- **Still discuss first when the fix is not settled.** A change with open design
+  questions, or one whose diagnosis says "verify on a real run first", gets
+  discussed before any code.
 - **Be concise.** No extra tables, summaries or explanation beyond what was asked.
 - **Say where commands run**, in bold — e.g. **On the box (`/opt/btcli`):**
 - **Long-running SSH commands:** warn up front and give literal `tmux` commands.
 
 ## State
 
-`main` = 29 commits, all work merged, nothing outstanding unpushed.
-329 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
+`main` = all work merged, nothing outstanding unpushed.
+396 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
 help-page render, wheel build + entry-point check.
 
 Every module carries a docstring explaining what the file does and how it flows;
@@ -41,6 +45,7 @@ btcli/
   discover.py     file discovery
   probe.py        probe flow
   auto.py         --auto track/style heuristics
+  classify.py     one Gemini call: which track and styles are dialogue
   extract.py      ffmpeg extraction, track merging
   manifest.py     .btcli.json job records; ManifestRun / NullManifestRun
   cache.py        .btcli-cache.json translation cache
@@ -87,6 +92,11 @@ reordering cannot corrupt it. `series_root_for()` maps a `Season NN` folder to
 its parent, so **all seasons of a series share one cache**. Written as each
 response arrives, so an interrupted run loses nothing.
 
+Because it is shared and grows during the run, "the cache holds this line" is
+**not** the same question as "an earlier run translated this line". The
+first-open snapshot (`cache._snapshots`, `from_earlier_run()`) answers the
+second, and anything user-facing must use it — see recently-fixed item 1.
+
 **Manifest.** `.btcli.json` per directory; records track/styles chosen and what
 was extracted. Reuse requires both a manifest record *and* the file still
 existing on disk. `--force` ignores it.
@@ -103,51 +113,151 @@ comments survive, write a `.bak`, and refuse to produce an unparseable file.
 `EMBED_FONT: true`. Verified all 7 model names exist against
 `GET /v1beta/models`.
 
-Nothing has ever been verified against the live API by tests — all 329 use a
-fake translator. Real-world confidence comes only from actual runs.
+Nothing has ever been verified against the live API by tests — all 396 use a
+fake translator or a stubbed selection call. Real-world confidence comes only
+from actual runs. **The style-selection prompt in particular has never had a
+real reply**: its validation is well covered, its prompt wording is not.
 
-## Open items
+## Recently fixed
 
-### 1. Resume prompt fires mid-run (bug, agreed fix: option C)
+Original item numbers are kept, so 1, 2 and 4 are here and 3 and 5 are still
+open below.
 
-Translating 3 seasons, the resume prompt appeared during season 2.
+### 1. Resume prompt fired mid-run — FIXED
 
-Cause: `_resume_choice` in `translate.py` latches only when `_ask_resume` is
-actually *called*, and it is only called when `cached_hits` is non-empty.
-On a fresh series season 1 has an empty cache, so it never asks and never
-latches. Season 1 then writes into the shared cache; season 2 finds its common
-lines ("Yes.", "Thank you.") and prompts — mid-run. The message is also false:
-it says "translated in an earlier run" when it was this run, minutes ago.
+The prompt appeared during season 2 of a 3-season job, stalling an unattended
+run on a keypress, and claimed the lines came from "an earlier run" when they
+were this run's own work from minutes earlier.
 
-Severity: a long unattended run **stalls waiting for a keypress**.
+Cause: `_resume_choice` latched only when `_ask_resume` was actually *called*,
+and it was only called when `cached_hits` was non-empty. A fresh series' season 1
+found an empty cache, so it never asked and never latched; it then filled the
+shared cache, and season 2's common lines ("Yes.", "Thank you.") triggered the
+prompt mid-run.
 
-Reproduced: two seasons under one show, season 1 → 0 prompts, season 2 → 1
-prompt (`cached: 3, missing: 1`).
+Fixed with two guards, since the snapshot alone left a hole:
 
-Agreed fix (**C**): snapshot the cache keys the first time the file is opened in
-the process, and only prompt about hits inside that snapshot. Makes "cached from
-an earlier run" literally true and cannot fire mid-run. Regression test: two
-seasons sharing a cache — zero prompts on a fresh series, exactly one on a real
-re-run.
+- **First-open snapshot** (`cache.py`). `_snapshots` records the key set each
+  cache file held the first time the process opened it, and never refreshes it.
+  `from_earlier_run()` is what the prompt consults, so a run can no longer
+  mistake its own work for an earlier run's.
+- **Work-started latch** (`translate.py`). `mark_work_started()` fires when the
+  first chunk is dispatched, after which the prompt is skipped and reuse
+  assumed. Needed because a genuine re-run whose first batch happens to be
+  all-new lines would otherwise still reach the question at batch 2, with the
+  run committed and nobody watching.
 
-Workaround today: `RESUME_PROMPT: false`.
+Also changed: declining now re-translates only the lines from earlier runs and
+keeps what the current run has paid for — it used to re-send everything,
+spending quota twice within one job.
 
-### 2. "not written because 0 unique line(s) remain untranslated" (bug)
+Note for future changes: `_resolve_cache` runs **per batch** (`FILES_PER_BATCH`,
+25) and interactive mode loops `run_translate` per folder, so anything that
+prompts from there can fire long after the run began.
+
+### 2. "not written because 0 unique line(s) remain untranslated" — FIXED
 
 Nonsense warning on files whose every style is in the passthrough list
-(`→ 0 cues`).
+(`→ 0 cues`), and the file was not written at all.
 
-Cause, both in `batch.py`:
-- line 147 `if not required or not required.issubset(available): continue` —
-  a file with no translatable cues has an empty `required`, so it is skipped and
-  never emitted.
-- line 175 `if missing_keys and len(missing_keys) <= tolerance:` — an empty set
-  is falsy, so it falls through to the failure branch, which reports
-  `len(missing_keys)` = 0.
+Three places were involved, not the two originally diagnosed:
 
-Proposed: write the file if it has any cues at all, so passthrough content is
-preserved; report "nothing to translate (all styles passthrough)" as info, not a
-warning. Cosmetic — no data lost.
+- `batch.write_ready` — `if not required or not required.issubset(...)` treated
+  an empty requirement as "not ready yet". An empty set is a subset of anything,
+  so dropping the `not required` clause makes such a file ready by definition.
+- `batch.finalize` — the failure message reported `len(missing_keys)` = 0. It now
+  distinguishes "no cues to write at all" from untranslated lines.
+- `sub_post.reassemble_files` — **the one the original diagnosis missed.** It
+  bailed on `if not cues` before reaching `build_ass_output`, which is what
+  actually carries passthrough cues over from the source. Without this the file
+  still would not have been written. Guarded by `_passthrough_cue_count()`, and
+  only for ASS: SRT has no styles, so it has nothing to carry.
+
+Written files are recorded as `complete`, because `manifest.finish()` reads that
+status to decide whether the job succeeded and a file needing no translation is
+not a shortfall.
+
+### 4. RETRY_ATTEMPTS warning was mis-levelled — FIXED
+
+`ai.effective_attempts()` raises the value unconditionally, so the warning
+demanded action that was impossible on every single command — and `--strict`
+refused to run at all over it.
+
+`check_settings()` now returns **three** lists: `(errors, warnings, notes)`.
+A note is logged with `log.info`, never blocks even under `--strict`, and does
+not withhold the "looks good" verdict. Callers unpacking two values need
+updating; `report_settings` is the only one in `btcli/`.
+
+The general rule this encodes: a warning that asks for nothing trains people to
+ignore warnings that ask for something.
+
+### 5. One-call Gemini style/track selection — SHIPPED (interactive only)
+
+`btcli/classify.py`. Interactive mode asks once whether Gemini should choose,
+and for an instruction; then one call per folder, verdict shown, user confirms.
+
+**The trap, for anyone touching this again:** `ai._generation_config()` sets
+`responseSchema` from `_response_schema()`, which pins **every** reply to an
+array of `{id, text}`. A verdict call routed through `_call_gemini` unchanged
+comes back forced into translation shape. `_call_gemini` therefore takes a
+`gen_config` override, and `classify` has its own config and schema. Reusable
+from `ai.py`: the transport, `model_ladder`, `backoff_before_retry`,
+`pace_requests`. Not reusable: every prompt builder, `_output_contract`,
+`_wire_items`, `_normalize_result`.
+
+Evidence sent per style: cue count, 2–3 samples, and whether cues carry `\pos`
+or `\k`. Cue count is the decisive signal. Track metadata comes too. Each
+**track** is a candidate with its own styles, because styles only exist once a
+track is chosen — that is why one call decides both rather than two.
+
+**The track is the first decision, not a side effect.** Picking "Signs & Songs"
+over "Full Subtitles" makes every style choice irrelevant, so the reply names a
+`track` explicitly and the styles are read within it. Every text track is
+offered, **including one with no ASS styles** — a plain-text track is a valid
+answer meaning "translate all of it", and excluding it would hide the right track
+whenever the wrong one was the only styled one. Track metadata is passed through
+as ffprobe gave it; `probe_tracks()` now also returns `tags` and `disposition`
+(additively — existing keys unchanged) because `disposition.forced` is the
+clearest signs-only marker available.
+
+**Styles are numbered per track and the model answers in numbers.**
+`enumerate_styles()` numbers each track's styles from 1, and that one numbering
+feeds the payload, the list shown to the user, and the reply check — all from the
+same pure function so they cannot drift. Per-track numbering keeps `track`
+authoritative: a number is valid for that track or it is not, so the two can
+never contradict each other. Numbers also remove the whole class of name errors.
+
+`usable_candidates()` must be applied before displaying, not just inside
+`choose()`, or the numbers a user sees would not be the numbers sent.
+
+An unknown track index is refused outright — acting on it would extract the wrong
+subtitles. An empty style list is accepted only for a track that genuinely has no
+styles; on a styled track it is refused, since falling back to the whole track
+would be a wider job than was asked for. A whole-track verdict is deliberately
+**not cached**, because the reuse check is style-based and there would be nothing
+to invalidate it against.
+
+Deliberate choices:
+- **Pinned model** (`AI_SELECT_MODEL`, default `gemini-3.5-flash-lite`) — chosen
+  for its RPD budget, so no ladder walk on failure.
+- **No pacing, one attempt.** `pace_requests()` would stall the questionnaire 60s
+  per folder. Failure falls through to the ordinary prompts, which is the better
+  fallback when the user is sitting right there.
+- **Never widens scope.** Invented style names dropped, unknown tracks rejected,
+  a reply with nothing usable discarded whole.
+- **Cache confirms anyway.** Verdict cached per *directory* in `.btcli.json`
+  (not per series — seasons genuinely differ), invalidated when the style set
+  changes, and still shown for confirmation. That is why it needs no `--force`
+  bypass: nothing stale can be used unseen.
+
+Settings are `AI_SELECT_STYLES` / `AI_SELECT_MODEL` / `AI_SELECT_PROMPT`. Adding
+any setting needs four coordinated edits — `config.py`, `settings.default.conf`
+byte-identical, named in `README.md`, typed in `validate.py` — and `test_docs.py`
+enforces all four. A new module also needs a README module-map entry.
+
+Not done: no `--auto` wiring, no CLI flag. Interactive only.
+
+## Open items
 
 ### 3. "Ignoring unexpected inline ID" churn (inefficiency)
 
@@ -164,40 +274,13 @@ the real `FFLLLL` tag internally. Validation stays equally strict, just against
 dense IDs. Verify the hypothesis first by logging rejected IDs against the
 chunk's expected set on one real run.
 
-### 4. RETRY_ATTEMPTS warning is mis-levelled (cosmetic)
+### 5b. Possible follow-ups to AI style selection
 
-`effective_attempts()` already corrects the condition unconditionally, so the
-warning demands action where none exists, on every command. Should be
-`log.info`/`detail`, not `log.warning`.
-
-### 5. Next feature: one-call Gemini classification during probe
-
-**Intent:** during the probing phase, send everything to Gemini in a **single
-API call** and have it name which styles are real dialogue and which track to
-use. Goal is regular dialogue only — no OP/ED, no signs, no inserts.
-
-Motivating case: a series with ~40 styles (`Base01`, `Base01 - Overlap`,
-`Base04`, `EdEnglish`, `Nodame Alt/Background/Insert EN/Insert JP/Past/Primary/
-Thought/Thought Alt`, `NodameED`, `NodameOP`, `OpEnglish`, `glaucue`, `glaucue2`,
-`gross`, `gyabo`, `huh`, `letter1/2`, `sign1`–`sign10`, `signa`–`signg`,
-`signs`, `signs-school`, `signs-skinny`, `why`) — unpickable by hand.
-
-Design notes from discussion:
-- Style *names* alone are a weak signal. Send per style: name, cue count,
-  2–3 sample lines, and whether cues carry `\pos` (signs) or `\k` (karaoke).
-  Cue count is nearly decisive — dialogue has hundreds, signs have a handful.
-- Track metadata (title/language from ffprobe) goes in the same call.
-- **Validate the reply against the real style/track sets** — reject hallucinated
-  names, same discipline as the translation IDs.
-- **Cache the verdict** in `.btcli.json`, asked once per series.
-- **Must not silently widen scope** — propose, user confirms; visible in
-  `--dry-run` before quota is spent.
-- **Fall back** to the existing `auto.py` heuristics if the call fails.
-- Open questions: count thoughts/monologue as dialogue (probably yes); exclude
-  inserts/letters (probably yes); opt-in or eventually default for `--auto`.
-
-Existing overlap to respect: `auto.py` track keyword matching,
-`styles.detect_karaoke_styles()`, `KEEP_TOP_STYLES` (top N by unique count).
+- Wire it into `--auto` / a CLI flag for non-interactive runs. Needs a decision
+  on what happens with no human to confirm the verdict.
+- The instruction is a single setting; a per-series override might be wanted.
+- `auto.py` heuristics are still the only fallback for non-interactive runs and
+  remain untouched.
 
 ### Parked at user's request
 
