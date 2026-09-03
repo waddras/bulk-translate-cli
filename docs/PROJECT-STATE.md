@@ -1,6 +1,6 @@
 # btcli — project state
 
-Paste this into a new chat as context. Current as of commit `8263dc4` on `main`.
+Paste this into a new chat as context. Current as of commit `6b477b9` on `main`.
 
 ## What this is
 
@@ -21,9 +21,14 @@ Only this repo is relevant. The `waddras/bulk-translate` web-UI repo is retired.
 
 ## State
 
-`main` = 25 commits, all work merged, nothing outstanding unpushed.
+`main` = 29 commits, all work merged, nothing outstanding unpushed.
 329 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
 help-page render, wheel build + entry-point check.
+
+Every module carries a docstring explaining what the file does and how it flows;
+docstring coverage is 95%. The 5% left are no-op stubs, trivial properties and
+nested closures whose parent explains them. Read the module docstring before
+changing a file — several record why the obvious alternative was rejected.
 
 ## Layout
 
