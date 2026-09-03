@@ -458,15 +458,22 @@ def _switching_model(attempt: int) -> bool:
 # ── Core API Call ─────────────────────────────────────────────────────────────
 
 async def _call_gemini(client: httpx.AsyncClient, prompt: str, api_key: str,
-                       model: str | None = None, attempt: int = 1) -> dict | None:
-    """Make a single Gemini API call. Returns parsed JSON response or None."""
+                       model: str | None = None, attempt: int = 1,
+                       gen_config: dict | None = None) -> dict | None:
+    """Make a single Gemini API call. Returns parsed JSON response or None.
+
+    *gen_config* overrides the translation generation config. It exists because
+    the default pins the reply to an array of {id, text} (see
+    ``_generation_config``), which would silently force any other kind of request
+    — such as the style verdict in ``classify.py`` — into translation shape.
+    """
     import json_repair
 
     if model is None:
         model = _get_model_for_attempt(attempt)
 
     url = f"{GEMINI_BASE}/{model}:generateContent"
-    gen_cfg = _generation_config()
+    gen_cfg = _generation_config() if gen_config is None else gen_config
 
     try:
         response = await client.post(

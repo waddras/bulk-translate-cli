@@ -348,12 +348,14 @@ WHAT IT ASKS
   1. input type: vid (extract tracks from video) or sub (existing subtitles)
   2. path (press Enter for the current directory)
   3. which folders to translate, as a numbered list - skip whole seasons here
-  4. for each CHOSEN folder, it samples ONE file and asks:
+  4. whether Gemini should choose the track and styles, and on what instruction
+  5. for each CHOSEN folder, it samples ONE file and asks:
        - which subtitle track to use (bitmap tracks are shown but rejected)
        - which styles to translate, as a numbered list
-  5. force re-extraction? (default no)
-  6. files per API call? (default auto)
-  7. a summary, then Proceed? [Y/n]
+     With AI selection on, its choice is shown here for you to accept first.
+  6. force re-extraction? (default no)
+  7. files per API call? (default auto)
+  8. a summary, then Proceed? [Y/n]
 
   When every folder has finished, any lines still missing are reported once,
   with the choice to retry at a smaller chunk size, list the untranslated lines,
@@ -371,7 +373,8 @@ GOING BACK
 
     at the style prompt      returns to the track prompt for that folder
     at the track prompt      returns to the previous folder
-    at the first folder      returns to the folder picker
+    at the first folder      returns to the AI selection question
+    at the AI question       returns to the folder picker
     at the folder picker     returns to the path
     at force / files-per-call / the summary
                              returns one step back, and from force back into
@@ -406,6 +409,37 @@ STYLE SELECTION
     ALL,+karaoke    translate all styles, passthrough karaoke   (default)
     1,3,+ALL        translate styles 1 and 3, passthrough the rest
     +3              passthrough style 3
+
+LETTING GEMINI CHOOSE
+  Asked once, before the folder questions. Worth it on a release with forty
+  styles (sign1..sign10, NodameOP, EdEnglish, letter1) where picking by hand is
+  guesswork.
+
+  It costs ONE extra API call per folder, on the model pinned by
+  AI_SELECT_MODEL, so a selection never spends a translation model's daily
+  quota. Each style is judged on its cue count, a few sample lines, and whether
+  its cues carry \\pos (a sign) or \\k (karaoke) - names alone are a weak signal.
+
+  What it chose is always shown for you to accept or reject:
+
+    Gemini chose track 0 and 2 of 41 style(s):
+      translate:   Base01, Nodame Primary
+      passthrough: the other 39 style(s), untouched
+      reason:      Base01 and Nodame Primary carry hundreds of conversational
+                   cues; the rest are positioned signs or karaoke.
+    Use this selection? [Y/n]
+
+  Nothing is taken on trust: a track or style name the file does not have is
+  discarded, and a reply with nothing usable left is dropped rather than widened
+  to "translate everything". Answer n, or let the call fail, and you get the
+  ordinary style prompt with nothing lost.
+
+  The verdict is cached in that folder's .btcli.json and reused only while the
+  styles on disk still match. A cached verdict still has to be confirmed, so
+  nothing stale is ever used without you seeing it.
+
+  AI_SELECT_STYLES sets the default answer; AI_SELECT_PROMPT is the default
+  instruction. Edit that to change what counts as dialogue for your library.
 
 WHEN A FOLDER HAS NO TRACKS
   If a video has no subtitle tracks but subtitle files sit beside it, you are

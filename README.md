@@ -106,6 +106,41 @@ btcli interactive -p /media/Show
 btcli interactive --dry-run     # ask everything, then report instead of running
 ```
 
+#### Letting Gemini pick the track and styles
+
+Interactive mode offers to choose for you. Useful on releases with forty styles
+(`sign1`–`sign10`, `NodameOP`, `EdEnglish`, `letter1`, `gyabo`) where picking by
+hand is guesswork.
+
+```
+Let Gemini choose the track and styles for you? [y/N]: y
+Instructions for Gemini [Enter for the default]:
+
+  FOLDER - Season 01  (12 file(s))
+  Gemini chose track 0 and 2 of 41 style(s):
+    translate:   Base01, Nodame Primary
+    passthrough: the other 39 styles, untouched
+    reason:      Base01 and Nodame Primary carry hundreds of conversational
+                 cues; the rest are positioned signs or karaoke.
+  Use this selection? [Y/n]
+```
+
+One extra API call per folder, on the model pinned by `AI_SELECT_MODEL` so it
+never spends a translation model's daily quota. Each style is judged on its cue
+count, sample lines, and whether its cues carry `\pos` or `\k` — names alone are
+a weak signal.
+
+Nothing is taken on trust: a track or style name that does not exist in the file
+is discarded, and a reply with nothing usable left in it is dropped entirely
+rather than widened to "translate everything". Answer `n`, or let the call fail,
+and you get the normal style prompt with nothing lost.
+
+The verdict is cached in that folder's `.btcli.json` and reused only while the
+styles on disk still match, so a re-release with renamed styles gets a fresh
+one. A cached verdict still has to be confirmed — it saves the call, not the
+decision — so nothing stale can be used without you seeing it. Edit
+`AI_SELECT_PROMPT` to change what counts as dialogue for your library.
+
 ### `probe` — look, don't touch
 
 Reports subtitle tracks, style names, and ASS override tags. Makes no API
@@ -319,6 +354,14 @@ below are what btcli uses if you configure nothing.
 | `GEMINI_MAX_OUTPUT_TOKENS` | `0` | `0` = let the model decide |
 | `GEMINI_RESPONSE_SCHEMA` | `true` | Pin the reply to `[{id, text}]`. Disable only if a model rejects schemas |
 
+### AI style selection (interactive mode only)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `AI_SELECT_STYLES` | `false` | Default answer to "let Gemini choose the track and styles?". You are asked either way |
+| `AI_SELECT_MODEL` | `gemini-3.5-flash-lite` | Model for that one call per folder. Pinned, so it never spends a translation model's quota |
+| `AI_SELECT_PROMPT` | see file | What counts as dialogue. The reply format is appended automatically and overrides it |
+
 ### Translation
 
 | Setting | Default | Description |
@@ -499,6 +542,7 @@ btcli/
 ├── discover.py     # File discovery
 ├── probe.py        # Probe flow
 ├── auto.py         # --auto track and style detection
+├── classify.py     # Ask Gemini which track and styles are dialogue
 ├── extract.py      # ffmpeg extraction and track merging
 ├── manifest.py     # .btcli.json job records
 ├── cache.py        # .btcli-cache.json translation cache

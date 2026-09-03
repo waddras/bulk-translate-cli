@@ -26,7 +26,7 @@ Only this repo is relevant. The `waddras/bulk-translate` web-UI repo is retired.
 ## State
 
 `main` = all work merged, nothing outstanding unpushed.
-341 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
+381 tests, pyflakes clean. CI: py3.9 + 3.12, compileall, pyflakes, pytest,
 help-page render, wheel build + entry-point check.
 
 Every module carries a docstring explaining what the file does and how it flows;
@@ -45,6 +45,7 @@ btcli/
   discover.py     file discovery
   probe.py        probe flow
   auto.py         --auto track/style heuristics
+  classify.py     one Gemini call: which track and styles are dialogue
   extract.py      ffmpeg extraction, track merging
   manifest.py     .btcli.json job records; ManifestRun / NullManifestRun
   cache.py        .btcli-cache.json translation cache
@@ -112,8 +113,10 @@ comments survive, write a `.bak`, and refuse to produce an unparseable file.
 `EMBED_FONT: true`. Verified all 7 model names exist against
 `GET /v1beta/models`.
 
-Nothing has ever been verified against the live API by tests — all 341 use a
-fake translator. Real-world confidence comes only from actual runs.
+Nothing has ever been verified against the live API by tests — all 381 use a
+fake translator or a stubbed selection call. Real-world confidence comes only
+from actual runs. **The style-selection prompt in particular has never had a
+real reply**: its validation is well covered, its prompt wording is not.
 
 ## Recently fixed
 
@@ -188,6 +191,45 @@ updating; `report_settings` is the only one in `btcli/`.
 The general rule this encodes: a warning that asks for nothing trains people to
 ignore warnings that ask for something.
 
+### 5. One-call Gemini style/track selection — SHIPPED (interactive only)
+
+`btcli/classify.py`. Interactive mode asks once whether Gemini should choose,
+and for an instruction; then one call per folder, verdict shown, user confirms.
+
+**The trap, for anyone touching this again:** `ai._generation_config()` sets
+`responseSchema` from `_response_schema()`, which pins **every** reply to an
+array of `{id, text}`. A verdict call routed through `_call_gemini` unchanged
+comes back forced into translation shape. `_call_gemini` therefore takes a
+`gen_config` override, and `classify` has its own config and schema. Reusable
+from `ai.py`: the transport, `model_ladder`, `backoff_before_retry`,
+`pace_requests`. Not reusable: every prompt builder, `_output_contract`,
+`_wire_items`, `_normalize_result`.
+
+Evidence sent per style: cue count, 2–3 samples, and whether cues carry `\pos`
+or `\k`. Cue count is the decisive signal. Track metadata comes too. Each
+**track** is a candidate with its own styles, because styles only exist once a
+track is chosen — that is why one call decides both rather than two.
+
+Deliberate choices:
+- **Pinned model** (`AI_SELECT_MODEL`, default `gemini-3.5-flash-lite`) — chosen
+  for its RPD budget, so no ladder walk on failure.
+- **No pacing, one attempt.** `pace_requests()` would stall the questionnaire 60s
+  per folder. Failure falls through to the ordinary prompts, which is the better
+  fallback when the user is sitting right there.
+- **Never widens scope.** Invented style names dropped, unknown tracks rejected,
+  a reply with nothing usable discarded whole.
+- **Cache confirms anyway.** Verdict cached per *directory* in `.btcli.json`
+  (not per series — seasons genuinely differ), invalidated when the style set
+  changes, and still shown for confirmation. That is why it needs no `--force`
+  bypass: nothing stale can be used unseen.
+
+Settings are `AI_SELECT_STYLES` / `AI_SELECT_MODEL` / `AI_SELECT_PROMPT`. Adding
+any setting needs four coordinated edits — `config.py`, `settings.default.conf`
+byte-identical, named in `README.md`, typed in `validate.py` — and `test_docs.py`
+enforces all four. A new module also needs a README module-map entry.
+
+Not done: no `--auto` wiring, no CLI flag. Interactive only.
+
 ## Open items
 
 ### 3. "Ignoring unexpected inline ID" churn (inefficiency)
@@ -205,34 +247,13 @@ the real `FFLLLL` tag internally. Validation stays equally strict, just against
 dense IDs. Verify the hypothesis first by logging rejected IDs against the
 chunk's expected set on one real run.
 
-### 5. Next feature: one-call Gemini classification during probe
+### 5b. Possible follow-ups to AI style selection
 
-**Intent:** during the probing phase, send everything to Gemini in a **single
-API call** and have it name which styles are real dialogue and which track to
-use. Goal is regular dialogue only — no OP/ED, no signs, no inserts.
-
-Motivating case: a series with ~40 styles (`Base01`, `Base01 - Overlap`,
-`Base04`, `EdEnglish`, `Nodame Alt/Background/Insert EN/Insert JP/Past/Primary/
-Thought/Thought Alt`, `NodameED`, `NodameOP`, `OpEnglish`, `glaucue`, `glaucue2`,
-`gross`, `gyabo`, `huh`, `letter1/2`, `sign1`–`sign10`, `signa`–`signg`,
-`signs`, `signs-school`, `signs-skinny`, `why`) — unpickable by hand.
-
-Design notes from discussion:
-- Style *names* alone are a weak signal. Send per style: name, cue count,
-  2–3 sample lines, and whether cues carry `\pos` (signs) or `\k` (karaoke).
-  Cue count is nearly decisive — dialogue has hundreds, signs have a handful.
-- Track metadata (title/language from ffprobe) goes in the same call.
-- **Validate the reply against the real style/track sets** — reject hallucinated
-  names, same discipline as the translation IDs.
-- **Cache the verdict** in `.btcli.json`, asked once per series.
-- **Must not silently widen scope** — propose, user confirms; visible in
-  `--dry-run` before quota is spent.
-- **Fall back** to the existing `auto.py` heuristics if the call fails.
-- Open questions: count thoughts/monologue as dialogue (probably yes); exclude
-  inserts/letters (probably yes); opt-in or eventually default for `--auto`.
-
-Existing overlap to respect: `auto.py` track keyword matching,
-`styles.detect_karaoke_styles()`, `KEEP_TOP_STYLES` (top N by unique count).
+- Wire it into `--auto` / a CLI flag for non-interactive runs. Needs a decision
+  on what happens with no human to confirm the verdict.
+- The instruction is a single setting; a per-series override might be wanted.
+- `auto.py` heuristics are still the only fallback for non-interactive runs and
+  remain untouched.
 
 ### Parked at user's request
 

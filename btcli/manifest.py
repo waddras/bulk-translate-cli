@@ -192,6 +192,58 @@ def find_reusable_extraction(video_path, tracks: list, suffix: str = "",
     return None
 
 
+def load_style_verdict(directory, styles: list) -> dict | None:
+    """A previously agreed AI style verdict for this folder, if still valid.
+
+    Kept per DIRECTORY rather than per series, because seasons of one show are
+    routinely subtitled by different groups with different style names — a
+    verdict for season 1 is not evidence about season 2.
+
+    Reused only while the styles on disk still match the ones it was judged
+    against, following the same rule as ``find_reusable_extraction``: a record is
+    trusted only when the thing it describes has not changed underneath it. A
+    re-release with renamed styles therefore gets a fresh verdict rather than a
+    silently wrong one.
+    """
+    verdict = _load(Path(directory)).get("ai_verdict")
+    if not isinstance(verdict, dict):
+        return None
+    if not isinstance(verdict.get("keep"), list) or not verdict["keep"]:
+        return None
+    if sorted(str(name) for name in verdict.get("styles", [])) != sorted(styles):
+        log.detail("    Ignoring cached style verdict: the styles have changed")
+        return None
+    # Any style it chose must still exist, or the selection would be a no-op.
+    if not set(verdict["keep"]).issubset(set(styles)):
+        log.detail("    Ignoring cached style verdict: a chosen style is gone")
+        return None
+    return verdict
+
+
+def save_style_verdict(directory, verdict: dict) -> None:
+    """Record an agreed verdict for this folder.
+
+    Written as its own top-level key, never into a job: jobs are append-only
+    history, and this is current state that gets replaced.
+    """
+    try:
+        path = Path(directory)
+        data = _load(path)
+        data["ai_verdict"] = {
+            "track": verdict.get("track"),
+            "keep": list(verdict.get("keep", [])),
+            "passthrough": list(verdict.get("passthrough", [])),
+            "styles": list(verdict.get("styles", [])),
+            "reason": verdict.get("reason", ""),
+            "model": verdict.get("model", ""),
+            "decided_at": _now(),
+        }
+        _save(path, data)
+    except Exception as exc:
+        # A verdict that cannot be cached is a lost optimisation, not a failure.
+        log.detail(f"    Could not record style verdict: {exc}")
+
+
 class NullManifestRun:
     """A manifest that records nothing.
 

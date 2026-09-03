@@ -40,6 +40,16 @@ DEFAULT_SETTINGS = {
     "GEMINI_MAX_OUTPUT_TOKENS": 0,
     "GEMINI_RESPONSE_SCHEMA": True,
 
+    # Interactive style selection (one call per folder, interactive mode only)
+    "AI_SELECT_STYLES": False,
+    "AI_SELECT_MODEL": "gemini-3.5-flash-lite",
+    "AI_SELECT_PROMPT": (
+        "select track and styles worth translation i want just the actual dialogue "
+        "no openings and no endings and passthrough the rest of styles as is. "
+        "Thoughts and inner monologue count as dialogue. "
+        "Signs, titles, letters, inserts, credits and karaoke are not dialogue."
+    ),
+
     # Translation
     "TRANSLATION_MODE": "chunked",
     "MAX_LINES_PER_CHUNK": 1000,

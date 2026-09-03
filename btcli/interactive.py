@@ -3,10 +3,15 @@
 Flow:
   1. choose input type (video tracks or existing subtitle files)
   2. choose a path (defaults to the current directory)
-  3. for every directory found, one level deep, sample a single file and choose
-     the subtitle track, then the styles to translate
-  4. choose whether to force re-extraction and how many files per API call
-  5. review a summary, confirm, then translate each directory with its own
+  3. choose whether Gemini should pick the track and styles, and on what
+     instruction — asked once, because it is a question about how you want to
+     work rather than about a particular season
+  4. for every directory found, one level deep, sample a single file and choose
+     the subtitle track, then the styles to translate. With AI selection on, the
+     model's choice is shown for confirmation first, and declining it drops
+     through to exactly these prompts
+  5. choose whether to force re-extraction and how many files per API call
+  6. review a summary, confirm, then translate each directory with its own
      settings
 
 Style selection accepts the same syntax as -s, plus list numbers:
@@ -241,6 +246,126 @@ def _styles_from_video(video: Path, track_index: int) -> list:
         return get_styles_from_file(extracted)
 
 
+# ── Letting the model choose ──────────────────────────────────────────────────
+
+def _video_candidates(video: Path, tracks: list) -> list:
+    """Describe every text track of one video, for the model to choose between.
+
+    Styles only exist once a track is picked, so each track has to be extracted
+    and sampled before the question can be asked at all — which is why the track
+    and the styles are decided by one call rather than two.
+
+    Extraction is local ffmpeg work, no quota, but it is not free: capped by
+    classify.MAX_TRACK_CANDIDATES so a file with thirty tracks cannot hang the
+    questionnaire.
+    """
+    from .classify import MAX_TRACK_CANDIDATES, style_facts
+    from .extract import _BITMAP_CODECS, extract_track
+
+    candidates = []
+    for track in tracks[:MAX_TRACK_CANDIDATES]:
+        if track.get("codec") in _BITMAP_CODECS:
+            continue          # image subtitles: nothing to read, nothing to translate
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                target = str(Path(tmp) / "sample.ass")
+                extracted = extract_track(str(video), track["index"], target,
+                                          force_srt=False)
+                if Path(extracted).suffix.lower() not in (".ass", ".ssa"):
+                    continue
+                facts = style_facts(extracted)
+        except Exception as exc:
+            log.detail(f"    Could not sample track {track['index']}: {exc}")
+            continue
+        if facts:
+            candidates.append({
+                "index": track["index"],
+                "codec": track.get("codec", ""),
+                "language": track.get("language", ""),
+                "title": track.get("title", ""),
+                "styles": facts,
+            })
+    return candidates
+
+
+def _show_verdict(verdict: dict, cached: bool) -> None:
+    """Print what was chosen, in enough detail to judge it."""
+    keep = verdict.get("keep", [])
+    total = len(verdict.get("styles", []))
+    others = max(0, total - len(keep))
+    source = "Cached selection" if cached else f"{verdict.get('model', 'Gemini')} chose"
+    where = "" if verdict.get("track") is None else f"track {verdict['track']} and "
+    print(f"  {source} {where}{len(keep)} of {total} style(s):")
+    _hint(f"    translate:   {', '.join(keep)}")
+    _hint(f"    passthrough: the other {others} style(s), untouched")
+    if verdict.get("reason"):
+        _hint(f"    reason:      {verdict['reason']}")
+
+
+def _try_ai_selection(directory: Path, candidates: list, ai: dict):
+    """Offer a model-chosen track and styles. Returns a verdict, None, or BACK.
+
+    None means "carry on and ask the user", which is the fallback for every
+    failure here: no candidates, no key, a refused call, an untrustworthy reply,
+    or the user simply saying no. In a guided flow the person is sitting right
+    there, so the normal prompt is a better fallback than a heuristic guess.
+
+    A cached verdict saves the call but not the confirmation — it is shown and
+    accepted exactly like a fresh one. That is what makes the cache safe without
+    a flag to bypass it: nothing stale can be used without being seen first.
+    """
+    from .classify import choose
+    from .manifest import load_style_verdict, save_style_verdict
+
+    if not candidates:
+        return None
+
+    # The style list the verdict has to be valid against is the one from the
+    # track it would apply to; with several tracks a cached verdict is matched
+    # against whichever track it named.
+    cached = None
+    for candidate in candidates:
+        styles = [fact["name"] for fact in candidate["styles"]]
+        found = load_style_verdict(directory, styles)
+        if found and found.get("track") == candidate["index"]:
+            cached = found
+            break
+
+    verdict = cached
+    if verdict is None:
+        print("  Asking Gemini to choose the track and styles...")
+        verdict = choose(candidates, ai.get("api_key", ""),
+                         instruction=ai.get("instruction", ""),
+                         source_lang=cfg.get("SOURCE_LANGUAGE", "english"))
+        if verdict is None:
+            _warn("  Gemini could not choose - falling back to the usual prompts.")
+            return None
+
+    _show_verdict(verdict, cached is not None)
+    answer = _ask_yes_no("  Use this selection?", True, allow_back=True)
+    if answer is BACK:
+        return BACK
+    if not answer:
+        _hint("  Ignoring it - choose by hand instead.")
+        return None
+
+    if cached is None:
+        save_style_verdict(directory, verdict)
+    return verdict
+
+
+def _plan_from_verdict(directory: Path, mode: str, files: list,
+                       verdict: dict) -> dict:
+    """Turn an accepted verdict into a plan, in the shape every plan has."""
+    from .classify import describe
+
+    return {"dir": directory, "mode": mode, "files": files,
+            "track": verdict.get("track"),
+            "styles_raw": f"AI: {describe(verdict)}",
+            "keep": list(verdict.get("keep", [])),
+            "passthrough": list(verdict.get("passthrough", []))}
+
+
 def _output_marker() -> str:
     """Filename marker identifying this target language's own output."""
     codes = cfg.get("LANGUAGE_CODES", {})
@@ -266,11 +391,14 @@ def _subtitle_files_in(directory: Path) -> list:
 
 # ── Per-directory planning ────────────────────────────────────────────────────
 
-def _plan_video_directory(directory: Path, videos: list):
+def _plan_video_directory(directory: Path, videos: list, ai: dict | None = None):
     """Ask for track and styles for one directory of videos.
 
     Returns a plan, None to skip the folder, or BACK. Going back at the style
     prompt re-asks the track; going back at the track prompt leaves the folder.
+
+    With *ai* the model is asked first and its answer offered for confirmation;
+    declining or failing falls through to exactly the same prompts as before.
     """
     from .extract import _BITMAP_CODECS, probe_tracks
 
@@ -284,7 +412,14 @@ def _plan_video_directory(directory: Path, videos: list):
         tracks = []
 
     if not tracks:
-        return _fallback_to_subtitles(directory)
+        return _fallback_to_subtitles(directory, ai)
+
+    if ai:
+        verdict = _try_ai_selection(directory, _video_candidates(sample, tracks), ai)
+        if verdict is BACK:
+            return BACK
+        if verdict is not None:
+            return _plan_from_verdict(directory, "vid", videos, verdict)
 
     while True:
         _show_tracks(tracks, _BITMAP_CODECS)
@@ -292,7 +427,7 @@ def _plan_video_directory(directory: Path, videos: list):
         if track_index is BACK:
             return BACK
         if track_index is None:
-            return _fallback_to_subtitles(directory)
+            return _fallback_to_subtitles(directory, ai)
 
         styles = _styles_from_video(sample, track_index)
         if not styles:
@@ -311,7 +446,7 @@ def _plan_video_directory(directory: Path, videos: list):
                 "keep": keep, "passthrough": passthrough}
 
 
-def _fallback_to_subtitles(directory: Path):
+def _fallback_to_subtitles(directory: Path, ai: dict | None = None):
     """Offer sibling subtitle files when a video has no usable tracks."""
     subtitles = _subtitle_files_in(directory)
     if not subtitles:
@@ -324,10 +459,11 @@ def _fallback_to_subtitles(directory: Path):
     if not answer:
         _warn("  Skipping this folder")
         return None
-    return _plan_subtitle_directory(directory, subtitles)
+    return _plan_subtitle_directory(directory, subtitles, ai)
 
 
-def _plan_subtitle_directory(directory: Path, subtitles: list):
+def _plan_subtitle_directory(directory: Path, subtitles: list,
+                             ai: dict | None = None):
     """Ask for styles for one directory of subtitle files."""
     from .srt_pre import get_styles_from_file
 
@@ -339,6 +475,18 @@ def _plan_subtitle_directory(directory: Path, subtitles: list):
         _hint(f"  {len(subtitles)} file(s), no ASS styles - all lines will be translated")
         return {"dir": directory, "mode": "sub", "files": subtitles, "track": None,
                 "styles_raw": "(no styles)", "keep": None, "passthrough": None}
+
+    if ai:
+        from .classify import style_facts
+        facts = style_facts(sample)
+        # One candidate with no index: there is no track to choose here, only
+        # styles, and classify treats a missing index as exactly that.
+        candidates = [{"index": None, "styles": facts}] if facts else []
+        verdict = _try_ai_selection(directory, candidates, ai)
+        if verdict is BACK:
+            return BACK
+        if verdict is not None:
+            return _plan_from_verdict(directory, "sub", subtitles, verdict)
 
     chosen = _ask_styles(styles, sample.name)
     if chosen is BACK:
@@ -416,15 +564,15 @@ def _discover_entries(mode: str, root: Path):
     return entries
 
 
-def _plan_one(mode: str, directory: Path, files: list):
+def _plan_one(mode: str, directory: Path, files: list, ai: dict | None = None):
     """Ask the questions for a single folder. Returns plan, None, or BACK."""
     _header(f"FOLDER - {directory.name or directory}  ({len(files)} file(s))")
     if mode == "vid":
-        return _plan_video_directory(directory, files)
-    return _plan_subtitle_directory(directory, files)
+        return _plan_video_directory(directory, files, ai)
+    return _plan_subtitle_directory(directory, files, ai)
 
 
-def _plan_folders(mode: str, entries: list, plans: dict):
+def _plan_folders(mode: str, entries: list, plans: dict, ai: dict | None = None):
     """Walk the chosen folders, allowing back to step to the previous folder.
 
     plans is keyed by folder index so answers survive stepping backwards and
@@ -437,7 +585,7 @@ def _plan_folders(mode: str, entries: list, plans: dict):
             index += 1
             continue
 
-        outcome = _plan_one(mode, directory, files)
+        outcome = _plan_one(mode, directory, files, ai)
         if outcome is BACK:
             if index == 0:
                 return BACK           # back past the first folder: re-pick folders
@@ -449,7 +597,8 @@ def _plan_folders(mode: str, entries: list, plans: dict):
     return True
 
 
-def _edit_plan(mode: str, entries: list, plans: dict) -> None:
+def _edit_plan(mode: str, entries: list, plans: dict,
+               ai: dict | None = None) -> None:
     """Redo the questions for one folder chosen by number."""
     ordered = [i for i in sorted(plans) if plans[i]]
     if not ordered:
@@ -467,7 +616,7 @@ def _edit_plan(mode: str, entries: list, plans: dict) -> None:
         if answer.isdigit() and 1 <= int(answer) <= len(ordered):
             index = ordered[int(answer) - 1]
             directory, files = entries[index]
-            outcome = _plan_one(mode, directory, files)
+            outcome = _plan_one(mode, directory, files, ai)
             if outcome is not BACK:
                 plans[index] = outcome
             return
@@ -499,6 +648,59 @@ def _drop_plan(plans: dict) -> None:
         _bad(f"  Enter a number between 1 and {len(ordered)}")
 
 
+def _ask_ai_selection(state: dict):
+    """Ask whether the model should choose the track and styles, and how.
+
+    Sets state["ai"] to None, or to {api_key, instruction} for the planning step.
+    Returns BACK to step back. Changing the answer discards existing plans, the
+    same as changing the input type or the path does, because every folder's
+    track and styles would otherwise be stale.
+
+    Asked once for the whole run rather than per folder: it is a question about
+    how you want to work, not about a particular season.
+    """
+    from .classify import default_instruction
+
+    previous = state.get("ai")
+    default_on = bool(cfg.get("AI_SELECT_STYLES", False)) if previous is None \
+        else previous is not None
+
+    answer = _ask_yes_no("Let Gemini choose the track and styles for you?",
+                         default_on, allow_back=True)
+    if answer is BACK:
+        return BACK
+
+    if not answer:
+        if previous is not None:
+            state["plans"] = {}
+        state["ai"] = None
+        return False
+
+    _hint("  One extra API call per folder, on "
+          f"{cfg.get('AI_SELECT_MODEL', 'the selection model')}.")
+    _hint("  You will see what it chose and can accept or reject it.")
+    instruction = _ask("Instructions for Gemini", "default", allow_back=True)
+    if instruction is BACK:
+        return BACK
+    if instruction.strip().lower() in ("", "default"):
+        instruction = default_instruction()
+        _hint(f"  Using: {instruction}")
+
+    # Resolved once here rather than per folder, so a missing key is reported
+    # before the questionnaire rather than as a silent fallback halfway through.
+    from .translate import _resolve_api_key
+    api_key = _resolve_api_key(False) or ""
+    if not api_key:
+        _warn("  No API key available - you will be asked to choose by hand.")
+        state["ai"] = None
+        return False
+
+    if previous is None or previous.get("instruction") != instruction:
+        state["plans"] = {}
+    state["ai"] = {"api_key": api_key, "instruction": instruction}
+    return True
+
+
 def _run(path: str | None, dry_run: bool = False) -> None:
     """Guided flow as a step machine, so any prompt can step backwards."""
     target_lang = cfg.get("TARGET_LANGUAGE", "arabic")
@@ -513,7 +715,7 @@ def _run(path: str | None, dry_run: bool = False) -> None:
     given_path = path
     state: dict = {"plans": {}}
     step = 0
-    STEPS = ("mode", "path", "folders", "plan", "force", "fpc", "confirm")
+    STEPS = ("mode", "path", "folders", "ai", "plan", "force", "fpc", "confirm")
 
     while True:
         name = STEPS[step]
@@ -565,8 +767,16 @@ def _run(path: str | None, dry_run: bool = False) -> None:
             state["entries"] = chosen
             step += 1
 
+        elif name == "ai":
+            answer = _ask_ai_selection(state)
+            if answer is BACK:
+                step -= 1
+                continue
+            step += 1
+
         elif name == "plan":
-            outcome = _plan_folders(state["mode"], state["entries"], state["plans"])
+            outcome = _plan_folders(state["mode"], state["entries"], state["plans"],
+                                    state.get("ai"))
             if outcome is BACK:
                 step -= 1
                 continue
@@ -617,7 +827,8 @@ def _run(path: str | None, dry_run: bool = False) -> None:
                 log.warning("Cancelled. Nothing was written.")
                 return
             if choice == "e":
-                _edit_plan(state["mode"], state["entries"], state["plans"])
+                _edit_plan(state["mode"], state["entries"], state["plans"],
+                           state.get("ai"))
                 continue
             if choice == "d":
                 _drop_plan(state["plans"])
